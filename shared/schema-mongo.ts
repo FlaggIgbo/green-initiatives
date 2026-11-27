@@ -262,12 +262,16 @@ export interface FlagComment {
 // Round-Up / Bank Linking
 // ============================================
 
-/** Linked bank account via Stripe Financial Connections */
+/** Linked bank account via Plaid Link (or legacy Stripe Financial Connections) */
 export interface LinkedBankAccount {
   id: string;
   userId: string;
-  /** Stripe Financial Connections account ID (fca_xxx) */
+  /** Legacy Stripe Financial Connections account ID (fca_xxx) or mock ID */
   stripeAccountId: string;
+  /** TODO(Plaid): Store Plaid Item ID, Account ID, encrypted access_token, and transactions/sync cursor */
+  plaidItemId?: string;
+  plaidAccountId?: string;
+  plaidSyncCursor?: string;
   /** Display name from bank (e.g. "Checking", "Savings") */
   displayName?: string;
   institutionName?: string;
@@ -283,6 +287,8 @@ export interface LinkedBankAccount {
 export interface InsertLinkedBankAccount {
   userId: string;
   stripeAccountId: string;
+  plaidItemId?: string;
+  plaidAccountId?: string;
   displayName?: string;
   institutionName?: string;
   last4?: string;
@@ -295,18 +301,27 @@ export interface RoundUpBatch {
   amountCents: number;
   projectIds: string[];
   donatedAt: Date;
+  /** TODO(Ledger/Alpaca): Track idempotency key and execution status across market hours */
+  idempotencyKey?: string;
+  executionStatus?: LedgerEntryStatus;
 }
 
 /** Tracks which transactions we've already processed for round-up (avoid duplicates) */
 export interface RoundUpTransaction {
   id: string;
   userId: string;
-  /** Stripe Financial Connections transaction ID (fctxn_xxx) */
+  /** External transaction ID (Plaid transaction_id or legacy Stripe fctxn_xxx) */
   stripeTransactionId: string;
+  /** TODO(Plaid): Unique indexed Plaid transaction_id for idempotent webhook/sync deduplication */
+  plaidTransactionId?: string;
   /** Original transaction amount in cents (negative = debit) */
   originalAmountCents: number;
   /** Round-up amount in dollars donated */
   roundUpAmount: number;
+  /** TODO(AI Categorization): Merchant category, estimated CO2e grams, and applied multiplier */
+  category?: string;
+  multiplierApplied?: number;
+  estimatedCarbonGrams?: number;
   /** When we processed this transaction */
   processedAt: Date;
 }
@@ -314,8 +329,90 @@ export interface RoundUpTransaction {
 export interface InsertRoundUpTransaction {
   userId: string;
   stripeTransactionId: string;
+  plaidTransactionId?: string;
   originalAmountCents: number;
   roundUpAmount: number;
+}
+
+// ============================================
+// TODO: Roadmap Interfaces (ESG Investing, Ledger, AI Vetting & Screener)
+// ============================================
+
+export const LEDGER_ENTRY_STATUS = {
+  accrued: "ACCRUED",
+  pendingSettlement: "PENDING_SETTLEMENT",
+  invested: "INVESTED",
+  failed: "FAILED",
+} as const;
+export type LedgerEntryStatus = (typeof LEDGER_ENTRY_STATUS)[keyof typeof LEDGER_ENTRY_STATUS];
+
+/** Double-entry ledger record for auditable round-up accounting */
+export interface LedgerEntry {
+  id: string;
+  userId: string;
+  idempotencyKey: string;
+  status: LedgerEntryStatus;
+  debitCents: number;
+  creditCents: number;
+  sourceTransactionId?: string;
+  batchId?: string;
+  brokerOrderId?: string;
+  createdAt: Date;
+}
+
+/** Weighted ETF/equity sleeve for fractional ESG investing via Alpaca */
+export interface EsgHoldingWeight {
+  symbol: string;
+  weight: number; // 0..1, weights in a basket must sum to 1.0
+  name?: string;
+}
+
+export interface EsgBasket {
+  id: string;
+  name: string;
+  description: string;
+  holdings: EsgHoldingWeight[];
+  oilAndGasExposurePct?: number;
+  updatedAt?: Date;
+}
+
+/** Dynamic carbon-adjusted round-up rule (e.g., 2x on airlines/gas, 1x on groceries) */
+export interface RoundUpMultiplierRule {
+  category: string;
+  multiplier: number;
+  matchMerchants?: string[];
+  autoMatchFlightEmissions?: boolean;
+}
+
+/** Live brokerage position returned from Alpaca /v2/positions */
+export interface PortfolioPosition {
+  symbol: string;
+  qty: number;
+  avgEntryPrice: number;
+  marketValue: number;
+  unrealizedPl: number;
+  unrealizedPlPct: number;
+}
+
+/** AI-generated admin triage scorecard for submitted project proposals */
+export interface ProjectVettingScorecard {
+  projectId: string;
+  confidenceScore: number; // 0..100
+  summary: string;
+  redFlags: string[];
+  extractedBudgetTotal?: number;
+  extractedPerDollarRatio?: number;
+  generatedAt: Date;
+}
+
+/** Controversy / greenwashing alert surfaced by the ESG Screener agent */
+export interface ControversyAlert {
+  symbol: string;
+  severity: "low" | "medium" | "high";
+  source: "sec_filing" | "epa_violation" | "news";
+  summary: string;
+  sourceUrl?: string;
+  detectedAt: Date;
 }
 
 // ============================================

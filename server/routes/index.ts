@@ -181,7 +181,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Projects
   app.get("/api/projects", optionalProtect, projectController.getProjects);
+  app.get("/api/projects/search", optionalProtect, projectController.searchProjects);
   app.get("/api/projects/:id", optionalProtect, projectController.getProject);
+  app.get(
+    "/api/projects/:id/vetting-scorecard",
+    protect,
+    authorize(USER_ROLES.admin),
+    projectController.getVettingScorecard,
+  );
   app.get("/api/my-projects", protect, projectController.getMyProjects);
   app.post(
     "/api/projects",
@@ -214,13 +221,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch("/api/user/roundup-settings", protect, userController.updateRoundUpSettings);
   app.patch("/api/user/preferred-currency", protect, userController.updatePreferredCurrency);
 
-  // Round-up / Bank linking
+  // Round-up / Bank linking (Plaid Link + legacy Financial Connections)
   app.post("/api/roundup/link-bank", protect, roundupController.createLinkSession);
   app.post("/api/roundup/link-bank-mock", protect, roundupController.createMockLink);
+  app.post("/api/roundup/plaid/link-token", protect, roundupController.createPlaidLinkToken);
+  app.post(
+    "/api/roundup/plaid/exchange-token",
+    protect,
+    roundupController.exchangePlaidPublicToken,
+  );
+  app.post("/api/plaid/webhook", roundupController.handlePlaidWebhook);
   app.get("/api/roundup/linked-accounts", protect, roundupController.getLinkedAccounts);
   app.get("/api/roundup/recent-transactions", protect, roundupController.getRecentTransactions);
   app.get("/api/roundup/summary", protect, roundupController.getRoundUpSummary);
   app.delete("/api/roundup/linked-accounts/:id", protect, roundupController.unlinkAccount);
+
+  // TODO: ESG Investing (Alpaca), Screener & Natural-Language Rebalancer endpoints
+  app.get("/api/portfolio/positions", protect, (_req, res) => {
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Call alpacaService.getPortfolioPositions(req.user.id)",
+    });
+  });
+  app.get("/api/portfolio/tax-lots.csv", protect, (_req, res) => {
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Call alpacaService.exportTaxLotsCsv(req.user.id, taxYear)",
+    });
+  });
+  app.get("/api/esg/baskets/:basketId/alerts", protect, (_req, res) => {
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Call esgAgentService.auditBasketHoldings(basketId)",
+    });
+  });
+  app.post("/api/esg/rebalance", protect, (_req, res) => {
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Call esgAgentService.translateNaturalLanguageRebalance(req.user.id, req.body.prompt)",
+    });
+  });
 
   // Cron: Flush round-up balances (Cloud Scheduler, secured by ROUNDUP_CRON_SECRET)
   app.post("/api/cron/flush-roundups", roundupController.flushRoundUpsCron);

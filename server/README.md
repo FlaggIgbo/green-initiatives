@@ -26,14 +26,14 @@ The server implements a dedicated service layer (`server/services/`) to encapsul
 - **RoundupService**: Round-up calculation, accumulation, and flush to projects.
 - **DocumentStorageService**: Abstraction layer for document persistence and retrieval.
 
-### Stripe & Teller Integration
+### Stripe & Plaid Integration
 
-The server integrates with **Stripe API** for project funding and **Teller API** for round-up donations:
+The server integrates with **Stripe API** for project funding and **Plaid API** for round-up bank feeds:
 
 - **Checkout Sessions**: Dynamic session creation for project funding.
 - **Local Payment Methods**: Added support for **OXXO** (Mexico) and **PIX** (Brazil).
 - **Metadata**: Tracks `projectId` and `userId` directly in Stripe sessions for reconciliation.
-- **Teller Connect Integration**: Bank linking for round-up donations. Allows users to connect mock/sandbox bank accounts via Teller.
+- **Plaid Link Integration**: Bank linking for round-up donations/investing. Allows users to connect mock/sandbox or live bank accounts via Plaid.
 - **Round-Up Service** (`roundup.service.ts`): Acorns-style accumulation in `User.roundUpBalanceCents`; flush when ≥ $5 via `POST /api/cron/flush-roundups` (with programmatic `X-Bypass-Stripe-Check` option for hermetic test execution).
 
 ### 🔄 Bank Linking & Cron Sequence Flow
@@ -47,7 +47,7 @@ sequenceDiagram
     participant DB as MongoDB Database
 
     User->>Client: Click "Link Bank Account"
-    Client->>Client: Open Teller Connect Dialog
+    Client->>Client: Open Plaid Link Dialog
     User->>Client: Select bank and enter mock credentials
     Client->>Server: POST /api/roundup/link-bank-mock (JSON payload)
     Server->>DB: Save Linked Bank Account & Seed starting balance ($10.00)

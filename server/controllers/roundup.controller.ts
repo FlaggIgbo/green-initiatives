@@ -122,7 +122,7 @@ export class RoundupController {
     res.json(result);
   });
 
-  /** POST: Link a mock bank account immediately (Simulated Teller connection) */
+  /** POST: Link a mock bank account immediately (Simulated Plaid Link connection) */
   createMockLink = asyncHandler(async (req: Request, res: Response) => {
     if (!req.user) {
       res.status(401).json({ error: "Unauthorized" });
@@ -135,20 +135,63 @@ export class RoundupController {
       userId: req.user.id,
       stripeAccountId: "mock_acc_" + Math.random().toString(36).substring(2, 11),
       displayName: displayName || "Checking Account",
-      institutionName: institutionName || "Teller Sandbox Bank",
+      institutionName: institutionName || "Plaid Sandbox Bank",
       last4: last4 || "4321",
     });
 
     // In development or sandbox mode, link a starting $10.00 round-up balance so the cron loop is immediately testable!
     await storage.addRoundUpBalance(req.user.id, 1000);
 
-    logger.info("Linked bank account created (Mock/Teller)", {
+    logger.info("Linked bank account created (Mock/Plaid)", {
       userId: req.user.id,
       accountId: mockAccount.stripeAccountId,
       institution: mockAccount.institutionName,
     });
 
     res.status(201).json(mockAccount);
+  });
+
+  /**
+   * POST /api/roundup/plaid/link-token
+   * TODO: Wire to plaidService.createLinkToken(req.user.id) and return { linkToken }.
+   */
+  createPlaidLinkToken = asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Call plaidService.createLinkToken(req.user.id) to initialize Plaid Link",
+    });
+  });
+
+  /**
+   * POST /api/roundup/plaid/exchange-token
+   * TODO: Exchange public_token via plaidService.exchangePublicToken(), encrypt access_token at rest,
+   * save LinkedBankAccount with plaidItemId/plaidAccountId, and kick off initial transactions/sync.
+   */
+  exchangePlaidPublicToken = asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Exchange Plaid public_token for encrypted access_token and persist linked account",
+    });
+  });
+
+  /**
+   * POST /api/plaid/webhook
+   * TODO: Verify Plaid-Verification JWT via plaidService.verifyPlaidWebhook(), then handle
+   * SYNC_UPDATES_AVAILABLE by running cursor-based transactions/sync and locking round-ups only for posted debits.
+   */
+  handlePlaidWebhook = asyncHandler(async (_req: Request, res: Response) => {
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Verify Plaid webhook signature and trigger incremental transactions/sync",
+    });
   });
 }
 

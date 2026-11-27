@@ -24,6 +24,9 @@ export class CommentController {
       projectId: String(req.params.id),
     };
 
+    // TODO(AI Guardrails): Call `esgAgentService.preModerateComment(commentData.content)` before
+    // writing to MongoDB to block obvious spam/harassment while keeping user-flagging as fallback.
+
     const comment = await storage.createComment(commentData, req.user.id, req.user.username);
 
     // Broadcast via WebSocket for real-time updates

@@ -11,6 +11,10 @@ import {
 } from "recharts";
 import { format, parseISO } from "date-fns";
 
+// TODO(Alpaca Portfolio): Upgrade ContributionChart (or add a PortfolioPerformanceChart mode)
+// to display live Alpaca positions, cost basis, unrealized P&L, and dividend reinvestments
+// from GET /api/portfolio/positions and /v2/account/activities.
+
 export interface ContributionDataPoint {
   month: string;
   amount: number;

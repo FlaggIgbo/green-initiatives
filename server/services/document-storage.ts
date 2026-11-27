@@ -1,6 +1,10 @@
+import { z } from "zod";
+import type { ProjectVettingScorecard } from "@shared/schema-mongo";
+
 /**
- * Document Storage Service Skeleton
- * TODO: Implement actual storage logic using Google Cloud Storage or AWS S3.
+ * Document Storage & AI Proposal Extraction Service Skeleton
+ * TODO: Implement actual storage logic using Google Cloud Storage or AWS S3,
+ * plus asynchronous PDF extraction and anomaly verification for project vetting.
  */
 
 export interface UploadedFile {
@@ -8,6 +12,22 @@ export interface UploadedFile {
   url: string;
   type: string;
 }
+
+export const extractedProposalSchema = z.object({
+  deliverables: z.array(z.string()),
+  budgetLineItems: z.array(
+    z.object({
+      category: z.string(),
+      amountUsd: z.number().nonnegative(),
+    }),
+  ),
+  claimedMetricType: z.enum(["trees", "carbon", "waste", "water"]),
+  claimedPerDollar: z.number().positive(),
+  claimedTargetAmount: z.number().positive(),
+  certifications: z.array(z.string()).default([]),
+});
+
+export type ExtractedProposalData = z.infer<typeof extractedProposalSchema>;
 
 export class DocumentStorageService {
   /**
@@ -38,6 +58,43 @@ export class DocumentStorageService {
   async verifyDocument(_url: string): Promise<boolean> {
     // TODO: Implement verification logic
     return true;
+  }
+
+  /**
+   * Structured Extraction from an uploaded PDF proposal / certification.
+   * TODO:
+   * 1. Fetch PDF bytes from GCS/S3 and parse text/tables (guard against untrusted/oversized PDFs)
+   * 2. Run through LLM with strict Zod schema enforcement (`extractedProposalSchema`)
+   * 3. Log token usage, latency, and parse failure rates via `logger.logAiTelemetry()`
+   */
+  async extractProposalFromPdf(_documentUrl: string): Promise<ExtractedProposalData> {
+    throw new Error("TODO: Implement DocumentStorageService.extractProposalFromPdf");
+  }
+
+  /**
+   * Sanity & Anomaly Checks against historical regional benchmarks.
+   * TODO:
+   * 1. Compare `claimedPerDollar` and budget totals against historical benchmarks
+   *    (e.g., flag if a California project claims $1 plants 500 trees)
+   * 2. Return list of human-readable red flags and a normalized anomaly penalty
+   */
+  runImpactSanityChecks(_extracted: ExtractedProposalData): {
+    redFlags: string[];
+    confidenceScore: number;
+  } {
+    // TODO: Replace stub with benchmark table + deterministic outlier rules
+    return { redFlags: [], confidenceScore: 0 };
+  }
+
+  /**
+   * Build an Admin Triage Scorecard combining extraction + sanity checks.
+   * TODO: Persist scorecard on the Project document so admins review exceptions instead of 20-page PDFs.
+   */
+  async buildAdminTriageScorecard(
+    _projectId: string,
+    _documentUrls: string[],
+  ): Promise<ProjectVettingScorecard> {
+    throw new Error("TODO: Implement DocumentStorageService.buildAdminTriageScorecard");
   }
 }
 

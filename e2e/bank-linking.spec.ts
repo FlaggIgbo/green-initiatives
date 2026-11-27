@@ -23,7 +23,7 @@ async function loginAsAdmin(page: Page) {
   await expect(page).not.toHaveURL(/\/auth/, { timeout: 5000 });
 }
 
-test.describe("Bank Linking with Teller", () => {
+test.describe("Bank Linking with Plaid", () => {
   test.describe.configure({ mode: "serial" });
 
   test.use({
@@ -32,7 +32,7 @@ test.describe("Bank Linking with Teller", () => {
     },
   });
 
-  test("should successfully link a bank account via Teller Connect", async ({ page }) => {
+  test("should successfully link a bank account via Plaid Link", async ({ page }) => {
     // Pipe browser console and page errors directly to the test logs
     page.on("console", (_msg) => {});
     page.on("pageerror", (_err) => {});
@@ -66,12 +66,12 @@ test.describe("Bank Linking with Teller", () => {
 
     await linkButton.click();
 
-    // 4. Verify Teller Connect dialog is displayed
-    const dialogTitle = page.locator("span", { hasText: "Teller Connect" }).first();
+    // 4. Verify Plaid Link dialog is displayed
+    const dialogTitle = page.locator("span", { hasText: "Plaid Link" }).first();
     await expect(dialogTitle).toBeVisible({ timeout: ACTION_TIMEOUT });
 
-    // 5. Select the Teller Sandbox Bank option
-    const sandboxBankBtn = page.getByRole("button", { name: /Teller Sandbox Bank/i });
+    // 5. Select the Plaid Sandbox Bank option
+    const sandboxBankBtn = page.getByRole("button", { name: /Plaid Sandbox Bank/i });
     await expect(sandboxBankBtn).toBeVisible({ timeout: ACTION_TIMEOUT });
     await sandboxBankBtn.click();
 
@@ -82,8 +82,8 @@ test.describe("Bank Linking with Teller", () => {
     await expect(usernameInput).toBeVisible({ timeout: ACTION_TIMEOUT });
     await expect(passwordInput).toBeVisible({ timeout: ACTION_TIMEOUT });
 
-    await usernameInput.fill("teller_user");
-    await passwordInput.fill("teller_secret_pass");
+    await usernameInput.fill("plaid_user");
+    await passwordInput.fill("plaid_secret_pass");
 
     const signInBtn = page.getByRole("button", { name: /Sign In/i });
     await expect(signInBtn).toBeVisible({ timeout: ACTION_TIMEOUT });
@@ -94,7 +94,7 @@ test.describe("Bank Linking with Teller", () => {
     await expect(selectAccountTitle).toBeVisible({ timeout: ACTION_TIMEOUT });
 
     // 8. Select the checking account
-    const checkingAccountBtn = page.getByRole("button", { name: /Teller Sandbox Checking/i });
+    const checkingAccountBtn = page.getByRole("button", { name: /Plaid Sandbox Checking/i });
     await expect(checkingAccountBtn).toBeVisible({ timeout: ACTION_TIMEOUT });
     await checkingAccountBtn.click();
 
@@ -108,7 +108,7 @@ test.describe("Bank Linking with Teller", () => {
     await confirmBtn.click();
 
     // 11. Assert that the linked bank account is displayed under the user settings
-    const listedAccountText = page.getByText(/Teller Sandbox Checking/i).first();
+    const listedAccountText = page.getByText(/Plaid Sandbox Checking/i).first();
     await expect(listedAccountText).toBeVisible({ timeout: ACTION_TIMEOUT });
   });
 
@@ -219,8 +219,8 @@ test.describe("Bank Linking with Teller", () => {
           method: "POST",
           headers,
           body: JSON.stringify({
-            displayName: "Teller Sandbox Checking",
-            institutionName: "Teller Sandbox Bank",
+            displayName: "Plaid Sandbox Checking",
+            institutionName: "Plaid Sandbox Bank",
             last4: "1234",
           }),
         });

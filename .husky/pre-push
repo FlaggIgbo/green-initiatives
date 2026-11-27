@@ -92,6 +92,6 @@ fi
 echo "Package file consistency check passed."
 echo ""
 
-cd GreenInitiatives
+./scripts/pre-push-screenshots.sh "$@"
 npm run pre-push
 
