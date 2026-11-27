@@ -209,5 +209,41 @@ export function createApiRouter(): Router {
     res.json(positions);
   });
 
+  // Charitable Giving, ACH, DAF & Tax Documents (Stubs)
+  router.get("/charities", requireAuth, async (_req, res) => {
+    // TODO: Wire to searchVerifiedCharities(req.query.q, req.query.category)
+    res.status(501).json({ error: "Not implemented" });
+  });
+
+  router.patch("/giving/settings", requireAuth, async (_req: AuthedRequest, res) => {
+    // TODO: Validate percentageBps, eligibleCategories, directCharitySplitPct + dafSplitPct === 100, and NACHA ACH consent
+    res.status(501).json({ error: "Not implemented" });
+  });
+
+  router.post("/giving/flush", requireAuth, async (_req: AuthedRequest, res) => {
+    // TODO: Wire to flushUserGiving(req.userId!)
+    res.status(501).json({ error: "Not implemented" });
+  });
+
+  router.post("/webhooks/plaid-transfer", async (_req, res) => {
+    // TODO: Wire to handleAchWebhook(rawBody, signatureHeader) to process ACH settlement/return events
+    res.status(501).json({ error: "Not implemented" });
+  });
+
+  router.post("/daf/provision", requireAuth, async (_req: AuthedRequest, res) => {
+    // TODO: Wire to provisionUserDafAccount(req.userId!)
+    res.status(501).json({ error: "Not implemented" });
+  });
+
+  router.post("/daf/grant", requireAuth, async (_req: AuthedRequest, res) => {
+    // TODO: Wire to recommendDafGrant({ userId, dafAccountId, charityEin, amountCents })
+    res.status(501).json({ error: "Not implemented" });
+  });
+
+  router.get("/tax-docs/:year", requireAuth, async (_req: AuthedRequest, res) => {
+    // TODO: Wire to generateTaxDocumentPacket(req.userId!, Number(req.params.year), format)
+    res.status(501).json({ error: "Not implemented" });
+  });
+
   return router;
 }
