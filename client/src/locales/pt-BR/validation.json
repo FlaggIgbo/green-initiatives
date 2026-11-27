@@ -1,9 +1,0 @@
-{
-  "title": "Erro de Validação",
-  "required": "Este campo é obrigatório",
-  "invalidEmail": "Endereço de e-mail inválido",
-  "minLength": "Deve ter pelo menos {{min}} caracteres",
-  "maxLength": "Deve ter no máximo {{max}} caracteres",
-  "numeric": "Deve ser um número",
-  "positive": "Deve ser um número positivo"
-}

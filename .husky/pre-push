@@ -1,97 +1,11 @@
 #!/bin/sh
+set -e
 
-# Check for package.json and package-lock.json consistency
-# If one is modified without the other, fail the push
-
-check_package_lock_consistency() {
-  # Get the remote tracking branch
-  remote_ref=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)
-  
-  if [ -z "$remote_ref" ]; then
-    # No upstream set, compare against origin/main or origin/master
-    if git rev-parse --verify origin/main >/dev/null 2>&1; then
-      remote_ref="origin/main"
-    elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-      remote_ref="origin/master"
-    else
-      echo "Warning: Could not determine base branch for package lock check. Skipping."
-      return 0
-    fi
-  fi
-
-  # Get list of changed files
-  changed_files=$(git diff --name-only "$remote_ref"...HEAD 2>/dev/null || git diff --name-only "$remote_ref" HEAD)
-
-  # Find all package.json files that changed
-  pkg_jsons_changed=$(echo "$changed_files" | grep 'package\.json$' || true)
-  
-  # Find all package-lock.json files that changed
-  pkg_locks_changed=$(echo "$changed_files" | grep 'package-lock\.json$' || true)
-
-  error=0
-
-  # For each package.json that changed, check if the corresponding lock file also changed
-  for pkg_json in $pkg_jsons_changed; do
-    dir=$(dirname "$pkg_json")
-    pkg_lock="$dir/package-lock.json"
-    
-    if [ -f "$pkg_lock" ]; then
-      if ! echo "$pkg_locks_changed" | grep -q "^$pkg_lock$"; then
-        # Only flag if dependency-related fields actually changed (not just scripts/metadata)
-        old_pkg=$(git show "$remote_ref":"$pkg_json" 2>/dev/null || echo '{}')
-        new_pkg=$(git show HEAD:"$pkg_json" 2>/dev/null || echo '{}')
-        deps_changed=$(node -e "
-          const old = JSON.parse(process.argv[1]);
-          const cur = JSON.parse(process.argv[2]);
-          const fields = ['dependencies','devDependencies','optionalDependencies','peerDependencies','overrides'];
-          const changed = fields.some(f => JSON.stringify(old[f]) !== JSON.stringify(cur[f]));
-          console.log(changed ? 'yes' : 'no');
-        " "$old_pkg" "$new_pkg" 2>/dev/null || echo 'yes')
-
-        if [ "$deps_changed" = "yes" ]; then
-          echo "ERROR: $pkg_json has dependency changes but $pkg_lock was not updated."
-          echo "       Please run 'npm install' to update the lock file."
-          error=1
-        fi
-      fi
-    fi
-  done
-
-  # For each package-lock.json that changed, check if the corresponding package.json also changed
-  for pkg_lock in $pkg_locks_changed; do
-    dir=$(dirname "$pkg_lock")
-    pkg_json="$dir/package.json"
-    
-    if [ -f "$pkg_json" ]; then
-      if ! echo "$pkg_jsons_changed" | grep -q "^$pkg_json$"; then
-        echo "ERROR: $pkg_lock was modified but $pkg_json was not."
-        echo "       This suggests the lock file was modified directly or regenerated without a package.json change."
-        echo "       Please ensure package.json and package-lock.json are in sync."
-        error=1
-      fi
-    fi
-  done
-
-  return $error
-}
-
-# 🛡️ Prevent direct pushes to main/master
 current_branch=$(git rev-parse --abbrev-ref HEAD)
 if [ "$current_branch" = "main" ] || [ "$current_branch" = "master" ]; then
-  echo "❌ ERROR: Direct push to '$current_branch' is prohibited."
-  echo "   Please create a pull request instead."
+  echo "❌ Direct push to '$current_branch' is prohibited. Push to a feature branch instead."
   exit 1
 fi
 
-echo "Checking package.json and package-lock.json consistency..."
-if ! check_package_lock_consistency; then
-  echo ""
-  echo "Push rejected due to package file inconsistency."
-  exit 1
-fi
-echo "Package file consistency check passed."
-echo ""
-
-cd GreenInitiatives
+./scripts/pre-push-screenshots.sh "$@"
 npm run pre-push
-
