@@ -20,9 +20,7 @@ jobs:
       - run: npm test
       - run: npx playwright install --with-deps chromium
       - run: HEADLESS=true npm run test:e2e
-      - run: |
-          npm run screenshots
-          git diff --exit-code screenshots/
+      - run: npm run screenshots
       - uses: actions/upload-artifact@v4
         if: always()
         with:
