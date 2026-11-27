@@ -1,21 +1,21 @@
-import type { EsgBasket, PortfolioPosition } from "@shared/schema-mongo";
+import type { EsgBasket, PortfolioPosition } from "@shared/types";
 
 /**
- * Alpaca Trading API Service (Stubs)
+ * Alpaca Trading API Service (Native fetch — zero Alpaca SDK required)
  *
- * Routes accumulated round-up flushes into fractional ESG ETF/equity baskets
- * using Alpaca's notional market orders (Paper Trading first, then Live).
+ * Uses ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL (Paper Trading by default).
+ * Falls back to simulated paper fills when credentials are not configured.
  */
 
-export const DEFAULT_ESG_BASKETS: EsgBasket[] = [
+export const ESG_BASKETS: EsgBasket[] = [
   {
     id: "clean-energy-grid",
     name: "Clean Energy & Grid",
     description: "Solar, clean energy infrastructure, and renewable utilities",
     holdings: [
-      { symbol: "ICLN", weight: 0.4, name: "iShares Global Clean Energy ETF" },
-      { symbol: "TAN", weight: 0.3, name: "Invesco Solar ETF" },
-      { symbol: "NEE", weight: 0.3, name: "NextEra Energy" },
+      { symbol: "ICLN", name: "iShares Global Clean Energy ETF", weight: 0.4 },
+      { symbol: "TAN", name: "Invesco Solar ETF", weight: 0.3 },
+      { symbol: "NEE", name: "NextEra Energy", weight: 0.3 },
     ],
   },
   {
@@ -23,8 +23,8 @@ export const DEFAULT_ESG_BASKETS: EsgBasket[] = [
     name: "Broad ESG Core",
     description: "Diversified US large-cap ESG screened equities",
     holdings: [
-      { symbol: "ESGU", weight: 0.6, name: "iShares ESG Aware MSCI USA ETF" },
-      { symbol: "USSG", weight: 0.4, name: "Xtrackers MSCI USA ESG Leaders Equity ETF" },
+      { symbol: "ESGU", name: "iShares ESG Aware MSCI USA ETF", weight: 0.6 },
+      { symbol: "USSG", name: "Xtrackers MSCI USA ESG Leaders ETF", weight: 0.4 },
     ],
   },
   {
@@ -32,86 +32,140 @@ export const DEFAULT_ESG_BASKETS: EsgBasket[] = [
     name: "Water & Circular Economy",
     description: "Water infrastructure and waste/recycling leaders",
     holdings: [
-      { symbol: "PHO", weight: 0.5, name: "Invesco Water Resources ETF" },
-      { symbol: "WM", weight: 0.5, name: "Waste Management" },
+      { symbol: "PHO", name: "Invesco Water Resources ETF", weight: 0.5 },
+      { symbol: "WM", name: "Waste Management", weight: 0.5 },
     ],
   },
 ];
 
-export interface FractionalOrderParams {
-  symbol: string;
-  notionalUsd: number;
+export function getBasketById(basketId: string): EsgBasket {
+  return ESG_BASKETS.find((b) => b.id === basketId) ?? ESG_BASKETS[0];
+}
+
+export function isAlpacaConfigured(): boolean {
+  return Boolean(process.env.ALPACA_API_KEY && process.env.ALPACA_SECRET_KEY);
+}
+
+async function alpacaRequest<T>(
+  path: string,
+  options: { method?: string; body?: Record<string, unknown> } = {},
+): Promise<T> {
+  const baseUrl = (process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets").replace(
+    /\/+$/,
+    "",
+  );
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: options.method || "GET",
+    headers: {
+      "APCA-API-KEY-ID": process.env.ALPACA_API_KEY || "",
+      "APCA-API-SECRET-KEY": process.env.ALPACA_SECRET_KEY || "",
+      "Content-Type": "application/json",
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  const data = (await response.json()) as T & { message?: string };
+  if (!response.ok) {
+    throw new Error(data.message || `Alpaca API error (${response.status})`);
+  }
+  return data;
+}
+
+export async function isMarketOpen(): Promise<boolean> {
+  if (!isAlpacaConfigured()) return true;
+  const clock = await alpacaRequest<{ is_open: boolean }>("/v2/clock");
+  return clock.is_open;
+}
+
+export async function submitBasketOrders(params: {
+  basketId: string;
+  amountCents: number;
   idempotencyKey: string;
+}): Promise<{ orderIds: string[]; status: "INVESTED" | "PENDING_SETTLEMENT" }> {
+  const basket = getBasketById(params.basketId);
+  const totalUsd = params.amountCents / 100;
+
+  if (!isAlpacaConfigured()) {
+    const orderIds = basket.holdings.map(
+      (h) => `mock_alpaca_${h.symbol}_${params.idempotencyKey.slice(-6)}`,
+    );
+    return { orderIds, status: "INVESTED" };
+  }
+
+  // TODO: Queue weekend/after-hours flushes and replay at 9:35 AM ET when market opens
+  const open = await isMarketOpen();
+  if (!open) {
+    return { orderIds: [], status: "PENDING_SETTLEMENT" };
+  }
+
+  const orderIds: string[] = [];
+  for (const holding of basket.holdings) {
+    const notional = Number((totalUsd * holding.weight).toFixed(2));
+    if (notional < 1) continue; // Alpaca requires >= $1.00 notional for fractional orders
+    const order = await alpacaRequest<{ id: string }>("/v2/orders", {
+      method: "POST",
+      body: {
+        symbol: holding.symbol,
+        notional: notional.toFixed(2),
+        side: "buy",
+        type: "market",
+        time_in_force: "day",
+        client_order_id: `${params.idempotencyKey}_${holding.symbol}`,
+      },
+    });
+    orderIds.push(order.id);
+  }
+
+  return { orderIds, status: "INVESTED" };
 }
 
-export interface FractionalOrderResult {
-  orderId: string;
-  symbol: string;
-  notionalUsd: number;
-  status: string;
+export async function getPortfolioPositions(): Promise<PortfolioPosition[]> {
+  if (!isAlpacaConfigured()) {
+    return [
+      {
+        symbol: "ICLN",
+        qty: 1.42,
+        avgEntryPrice: 14.1,
+        marketValue: 21.3,
+        unrealizedPl: 1.28,
+        unrealizedPlPct: 6.39,
+      },
+      {
+        symbol: "TAN",
+        qty: 0.36,
+        avgEntryPrice: 41.2,
+        marketValue: 15.84,
+        unrealizedPl: 1.01,
+        unrealizedPlPct: 6.81,
+      },
+      {
+        symbol: "NEE",
+        qty: 0.21,
+        avgEntryPrice: 71.5,
+        marketValue: 15.75,
+        unrealizedPl: 0.74,
+        unrealizedPlPct: 4.93,
+      },
+    ];
+  }
+
+  const raw = await alpacaRequest<
+    Array<{
+      symbol: string;
+      qty: string;
+      avg_entry_price: string;
+      market_value: string;
+      unrealized_pl: string;
+      unrealized_plpc: string;
+    }>
+  >("/v2/positions");
+
+  return raw.map((p) => ({
+    symbol: p.symbol,
+    qty: Number(p.qty),
+    avgEntryPrice: Number(p.avg_entry_price),
+    marketValue: Number(p.market_value),
+    unrealizedPl: Number(p.unrealized_pl),
+    unrealizedPlPct: Number((Number(p.unrealized_plpc) * 100).toFixed(2)),
+  }));
 }
-
-export class AlpacaService {
-  /**
-   * GET /v2/clock
-   * TODO: Check Alpaca market clock. Fractional `notional` orders only execute as `day` orders
-   * during regular market hours; queue weekend/after-hours flushes to execute at 9:35 AM ET.
-   */
-  async isMarketOpen(): Promise<{ isOpen: boolean; nextOpenIso: string }> {
-    throw new Error("TODO: Implement AlpacaService.isMarketOpen via GET /v2/clock");
-  }
-
-  /**
-   * POST /v2/orders
-   * TODO:
-   * 1. Enforce minimum $1.00 notional per order
-   * 2. Submit market buy order with `notional`, `time_in_force: "day"`, and `client_order_id: idempotencyKey`
-   * 3. Handle retries idempotently using `client_order_id`
-   */
-  async submitFractionalOrder(_params: FractionalOrderParams): Promise<FractionalOrderResult> {
-    throw new Error("TODO: Implement AlpacaService.submitFractionalOrder via POST /v2/orders");
-  }
-
-  /**
-   * Split an accumulated round-up flush across a user's selected ESG basket weights.
-   * TODO:
-   * 1. Look up user's target EsgBasket (or custom rebalanced weights)
-   * 2. Check `isMarketOpen()`; if closed, persist batch as PENDING_SETTLEMENT for next market open
-   * 3. Submit fractional orders for each leg with deterministic per-leg idempotency keys
-   * 4. Record INVESTED / FAILED entries in LedgerService
-   */
-  async executeBasketOrders(
-    _userId: string,
-    _basketId: string,
-    _amountCents: number,
-    _idempotencyKey: string,
-  ): Promise<FractionalOrderResult[]> {
-    throw new Error("TODO: Implement AlpacaService.executeBasketOrders");
-  }
-
-  /**
-   * GET /v2/positions
-   * TODO: Fetch live holdings, cost basis, and unrealized P&L to power /profile charts.
-   */
-  async getPortfolioPositions(_userId: string): Promise<PortfolioPosition[]> {
-    throw new Error("TODO: Implement AlpacaService.getPortfolioPositions via GET /v2/positions");
-  }
-
-  /**
-   * GET /v2/account/activities
-   * TODO: Pull fills, dividend reinvestments (DIV), and ACH transfers for portfolio history.
-   */
-  async getAccountActivities(_userId: string): Promise<Record<string, unknown>[]> {
-    throw new Error("TODO: Implement AlpacaService.getAccountActivities");
-  }
-
-  /**
-   * Export realized gains/losses, wash sales, and dividend reinvestment cost basis as CSV.
-   * TODO: Aggregate tax lots from Alpaca activities + LedgerService and format as RFC 4180 CSV.
-   */
-  async exportTaxLotsCsv(_userId: string, _taxYear: number): Promise<string> {
-    throw new Error("TODO: Implement AlpacaService.exportTaxLotsCsv");
-  }
-}
-
-export const alpacaService = new AlpacaService();

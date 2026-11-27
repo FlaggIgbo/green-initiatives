@@ -1,329 +1,226 @@
-/* eslint-disable no-console */
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
-import { chromium, type Page } from "@playwright/test";
+import { chromium, type Page } from "playwright";
 
-// When run via tsx, esbuild injects `__name(fn, "name")` helpers into named
-// functions. Callbacks passed to page.evaluate()/addInitScript() are serialized
-// into the browser, where that helper does not exist, so define a no-op shim.
 const TSX_NAME_SHIM = "globalThis.__name = globalThis.__name || ((fn) => fn);";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Detect whether running against a remote deployment or local preview server
-const targetArg = process.argv.find(
-  (arg) => arg.startsWith("http://") || arg.startsWith("https://"),
-);
-const TARGET_URL = process.env.TARGET_URL || targetArg || null;
-const isRemote = Boolean(TARGET_URL);
-
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, "..");
 const DIST_PUBLIC_DIR = path.resolve(ROOT_DIR, "dist/public");
 const RECORDINGS_DIR = path.resolve(ROOT_DIR, "recordings");
-const DOWNLOADS_DIR =
-  process.env.DOWNLOADS_DIR ||
-  (process.env.HOME ? path.resolve(process.env.HOME, "Downloads") : RECORDINGS_DIR);
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
-  ".ico": "image/x-icon",
-  ".png": "image/png",
   ".svg": "image/svg+xml",
-  ".woff2": "font/woff2",
+  ".png": "image/png",
 };
 
 function ensureClientBuild() {
   if (process.env.SKIP_BUILD === "1" && fs.existsSync(path.join(DIST_PUBLIC_DIR, "index.html"))) {
-    console.log("⏭️  SKIP_BUILD=1 and dist/public exists; skipping Vite build.");
     return;
   }
-  console.log("🔨 Building React client bundle (vite build)...");
-  execSync("npx vite build", {
-    cwd: ROOT_DIR,
-    stdio: "pipe",
-  });
+  execSync("npx vite build", { cwd: ROOT_DIR, stdio: "pipe" });
 }
 
-function startStaticSpaServer(): Promise<{ server: http.Server; baseUrl: string }> {
+function startStaticServer(): Promise<{ server: http.Server; baseUrl: string }> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
-      const parsedUrl = new URL(req.url || "/", "http://localhost");
-      let pathname = decodeURIComponent(parsedUrl.pathname);
-      if (pathname === "/") {
-        pathname = "/index.html";
-      }
-
-      let filePath = path.join(DIST_PUBLIC_DIR, pathname);
-      if (!filePath.startsWith(DIST_PUBLIC_DIR)) {
-        res.writeHead(403);
-        res.end("Forbidden");
-        return;
-      }
-
+      const pathname = decodeURIComponent(new URL(req.url || "/", "http://localhost").pathname);
+      let filePath = path.join(DIST_PUBLIC_DIR, pathname === "/" ? "index.html" : pathname);
       if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
         filePath = path.join(DIST_PUBLIC_DIR, "index.html");
       }
-
       const ext = path.extname(filePath).toLowerCase();
-      const contentType = MIME_TYPES[ext] || "application/octet-stream";
-      const content = fs.readFileSync(filePath);
-      res.writeHead(200, { "Content-Type": contentType });
-      res.end(content);
+      res.writeHead(200, { "Content-Type": MIME_TYPES[ext] || "application/octet-stream" });
+      res.end(fs.readFileSync(filePath));
     });
-
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : 4173;
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 4173;
       resolve({ server, baseUrl: `http://localhost:${port}` });
     });
   });
 }
 
-async function setupStatefulE2EMocks(page: Page) {
-  let currentUser: Record<string, unknown> | null = null;
-  const linkedAccounts: Record<string, unknown>[] = [];
-  const projects = [
-    {
-      id: "proj_solar_ca",
-      title: "Solar Energy Farm - California",
-      description: "Community-owned solar microgrid reducing fossil-fuel generation.",
-      organizationId: "org_1",
-      location: { lat: 36.7783, lng: -119.4179, address: "Fresno, CA, USA" },
-      imageUrl: "",
-      targetFunding: 50000,
-      currentFunding: 34250,
-      progress: 68,
-      status: "active",
-      createdBy: "usr_e2e_1",
-      approvalStatus: "approved",
-      createdAt: "2026-02-01T10:00:00.000Z",
-      allowedEnvironments: ["development", "sandbox", "production"],
-      proposal: {
-        objectives: "Deploy 250kW of rooftop solar panels.",
-        methodology: "IoT smart meter verification.",
-        timeline: [{ phase: "Phase 1", duration: "Q1", deliverables: "Installation" }],
-        fundingBreakdown: [{ category: "Hardware", amount: 50000, description: "Panels" }],
-        measurableImpact: {
-          metric: "kg CO2 offset",
-          targetValue: 120000,
-          trackingMethod: "IoT Smart Meter",
-        },
-      },
-      impactMetrics: {
-        type: "carbon",
-        unit: "kg CO2",
-        targetAmount: 120000,
-        currentAmount: 81600,
-        perDollar: 2.4,
-      },
-    },
-  ];
+async function setupStatefulMocks(page: Page) {
+  let user: {
+    id: string;
+    email: string;
+    roundUpEnabled: boolean;
+    selectedBasketId: string;
+    roundUpBalanceCents: number;
+  } | null = null;
+  const accounts: Record<string, unknown>[] = [];
+  const recentTransactions: Record<string, unknown>[] = [];
 
-  await page.context().route("**/api/**", async (route) => {
+  await page.context().route("**/api/**", (route) => {
     const req = route.request();
-    const url = new URL(req.url());
-    const pathname = url.pathname;
+    const pathname = new URL(req.url()).pathname;
     const method = req.method();
-    let body: Record<string, unknown> = {};
-    try {
-      body = (req.postDataJSON() as Record<string, unknown>) || {};
-    } catch {
-      body = {};
+    const body = (req.postDataJSON() as Record<string, unknown>) || {};
+
+    if (pathname === "/api/auth/me") {
+      return user
+        ? route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ user }),
+          })
+        : route.fulfill({ status: 401, contentType: "application/json", body: "{}" });
     }
 
-    if (pathname.endsWith("/api/config")) {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ stripeDisabled: false, environment: "development" }),
-      });
-    }
-
-    if (pathname.endsWith("/api/locale")) {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ locale: "en-US", currency: "USD" }),
-      });
-    }
-
-    if (pathname.endsWith("/api/login") && method === "POST") {
-      currentUser = {
-        id: "usr_e2e_1",
-        username: String(body.username || "admin"),
-        fullName: "E2E Admin",
-        email: "admin@greeninitiatives.local",
-        role: "admin",
-        points: 100,
-        treeGrowth: 25,
-        sunwaterCoins: 50,
-        allowedEnvironment: "development",
-        roundUpEnabled: false,
-        roundUpProjectIds: [],
-        roundUpBalanceCents: 0,
-        preferredCurrency: "USD",
-        createdAt: new Date().toISOString(),
+    if (
+      (pathname === "/api/auth/login" || pathname === "/api/auth/register") &&
+      method === "POST"
+    ) {
+      user = {
+        id: "usr_e2e",
+        email: String(body.email || "demo@example.com"),
+        roundUpEnabled: true,
+        selectedBasketId: "clean-energy-grid",
+        roundUpBalanceCents: 450,
       };
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ user: currentUser, token: "e2e-mock-token" }),
+        body: JSON.stringify({ user }),
       });
     }
 
-    if (pathname.endsWith("/api/user")) {
-      if (!currentUser) {
-        return route.fulfill({
-          status: 401,
-          contentType: "application/json",
-          body: JSON.stringify({ error: "Unauthorized" }),
-        });
-      }
+    if (pathname === "/api/baskets") {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(currentUser),
+        body: JSON.stringify([
+          {
+            id: "clean-energy-grid",
+            name: "Clean Energy & Grid",
+            description: "Solar, clean energy infrastructure, and renewable utilities",
+            holdings: [
+              { symbol: "ICLN", name: "iShares Global Clean Energy ETF", weight: 0.4 },
+              { symbol: "TAN", name: "Invesco Solar ETF", weight: 0.3 },
+              { symbol: "NEE", name: "NextEra Energy", weight: 0.3 },
+            ],
+          },
+        ]),
       });
     }
 
-    if (pathname.endsWith("/api/projects") || pathname.endsWith("/api/my-projects")) {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(projects),
-      });
-    }
-
-    if (/\/api\/projects\/[^/]+\/comments$/.test(pathname)) {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ comments: [], count: 0 }),
-      });
-    }
-
-    if (/\/api\/projects\/[^/]+$/.test(pathname)) {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(projects[0]),
-      });
-    }
-
-    if (pathname.endsWith("/api/roundup/link-bank-mock") && method === "POST") {
-      const account = {
-        id: `acc_${linkedAccounts.length + 1}`,
-        userId: "usr_e2e_1",
-        stripeAccountId: `mock_acc_${linkedAccounts.length + 1}`,
-        displayName: String(body.displayName || "Plaid Sandbox Checking"),
+    if (pathname === "/api/plaid/exchange" && method === "POST") {
+      const acc = {
+        id: `acc_${accounts.length + 1}`,
+        plaidItemId: "item_e2e",
+        plaidAccountId: "acc_e2e",
         institutionName: String(body.institutionName || "Plaid Sandbox Bank"),
-        last4: String(body.last4 || "1234"),
-        status: "active",
+        accountName: String(body.accountName || "Checking"),
+        mask: String(body.mask || "1234"),
         createdAt: new Date().toISOString(),
       };
-      linkedAccounts.push(account);
-      if (currentUser) {
-        currentUser.roundUpBalanceCents = 1000;
-      }
+      accounts.push(acc);
       return route.fulfill({
         status: 201,
         contentType: "application/json",
-        body: JSON.stringify(account),
+        body: JSON.stringify(acc),
       });
     }
 
-    if (pathname.endsWith("/api/roundup/linked-accounts")) {
+    if (pathname === "/api/plaid/accounts") {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(linkedAccounts),
+        body: JSON.stringify(accounts),
       });
     }
 
-    if (pathname.endsWith("/api/user/roundup-settings") && method === "PATCH") {
-      if (currentUser) {
-        if (typeof body.enabled === "boolean") currentUser.roundUpEnabled = body.enabled;
-        if (Array.isArray(body.projectIds)) currentUser.roundUpProjectIds = body.projectIds;
-      }
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(currentUser),
+    if (pathname === "/api/plaid/sync" && method === "POST") {
+      recentTransactions.push({
+        id: "t_e2e",
+        plaidTransactionId: "plaid_e2e_1",
+        merchantName: "Blue Bottle Coffee",
+        amountCents: 435,
+        roundUpCents: 65,
+        date: "2026-11-27",
       });
-    }
-
-    if (pathname.endsWith("/api/roundup/summary")) {
+      if (user) user.roundUpBalanceCents += 65;
       return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          balanceCents: Number(currentUser?.roundUpBalanceCents ?? 0),
-          batches: [],
+          addedCount: 1,
+          accruedCents: 65,
+          balanceCents: user?.roundUpBalanceCents ?? 0,
         }),
       });
     }
 
-    if (pathname.endsWith("/api/user/contributions")) {
+    if (pathname === "/api/roundup/flush" && method === "POST") {
+      const investedCents = user?.roundUpBalanceCents ?? 0;
+      if (user) user.roundUpBalanceCents = 0;
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([]),
+        body: JSON.stringify({
+          investedCents,
+          status: "INVESTED",
+          orderIds: ["ord_icln", "ord_tan", "ord_nee"],
+        }),
       });
     }
 
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({}),
-    });
+    if (pathname === "/api/roundup/summary") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          balanceCents: user?.roundUpBalanceCents ?? 0,
+          thresholdCents: 500,
+          roundUpEnabled: user?.roundUpEnabled ?? true,
+          selectedBasketId: user?.selectedBasketId ?? "clean-energy-grid",
+          recentTransactions,
+          ledgerEntries: [],
+        }),
+      });
+    }
+
+    if (pathname === "/api/portfolio/positions") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            symbol: "ICLN",
+            qty: 1.42,
+            avgEntryPrice: 14.1,
+            marketValue: 21.3,
+            unrealizedPl: 1.28,
+            unrealizedPlPct: 6.39,
+          },
+        ]),
+      });
+    }
+
+    return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
   });
 }
 
 async function main() {
-  console.log("========================================================================");
-  console.log("🎬 Starting Playwright E2E Flow with Browser Automation & Recording");
-  console.log(`   Recording Folder: ${RECORDINGS_DIR}`);
-  console.log("========================================================================\n");
-
-  let localServer: http.Server | null = null;
-  let webUrl = TARGET_URL ? TARGET_URL.replace(/\/+$/, "") : "";
-
-  if (!isRemote) {
-    ensureClientBuild();
-    const started = await startStaticSpaServer();
-    localServer = started.server;
-    webUrl = started.baseUrl;
-    console.log(`✅ Local web server listening at ${webUrl}\n`);
-  }
-
+  ensureClientBuild();
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
-  if (!process.env.CI) {
-    fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-  }
 
+  const { server, baseUrl } = await startStaticServer();
   const isHeadless = process.env.HEADLESS === "true" || process.env.CI === "true";
-  console.log(`🌐 Launching Chromium browser (headless: ${isHeadless})...`);
-  const browser = await chromium.launch({
-    headless: isHeadless,
-    slowMo: isHeadless ? 0 : 250,
-  });
-
+  const browser = await chromium.launch({ headless: isHeadless, slowMo: isHeadless ? 0 : 250 });
   const context = await browser.newContext({
-    viewport: { width: 1280, height: 850 },
-    recordVideo: {
-      dir: RECORDINGS_DIR,
-      size: { width: 1280, height: 850 },
-    },
+    viewport: { width: 1280, height: 800 },
+    recordVideo: { dir: RECORDINGS_DIR, size: { width: 1280, height: 800 } },
   });
-
   const page = await context.newPage();
   await page.addInitScript(TSX_NAME_SHIM);
 
@@ -331,82 +228,46 @@ async function main() {
   page.on("pageerror", (err) => pageErrors.push(err.message));
 
   try {
-    if (!isRemote) {
-      await setupStatefulE2EMocks(page);
-    }
+    await setupStatefulMocks(page);
 
-    // 1. Login via /auth
-    console.log("1️⃣  Navigating to /auth and signing in...");
-    await page.goto(`${webUrl}/auth`, { waitUntil: "networkidle" });
-    await page.locator('input[name="username"]').fill("admin");
-    await page.locator('input[name="password"]').fill("@berrybank1");
-    await page.getByRole("button", { name: /login|iniciar|entrar/i }).click();
-    await page.waitForURL((u) => !u.pathname.includes("/auth"), { timeout: 15000 });
-    console.log("   ✓ Signed in successfully");
-
-    // 2. Browse Projects Marketplace
-    console.log("2️⃣  Browsing /projects marketplace...");
-    await page.goto(`${webUrl}/projects`, { waitUntil: "networkidle" });
-    await page
-      .getByText(/Solar Energy Farm - California/i)
-      .first()
-      .waitFor({ timeout: 15000 });
-    console.log("   ✓ Projects marketplace rendered");
-
-    // 3. Open Project Details
-    console.log("3️⃣  Opening Project Details...");
-    await page.goto(`${webUrl}/project/proj_solar_ca`, { waitUntil: "networkidle" });
-    await page
-      .getByText(/Solar Energy Farm - California/i)
-      .first()
-      .waitFor({ timeout: 15000 });
-    console.log("   ✓ Project details loaded");
-
-    // 4. Link Bank Account via Plaid Link Dialog in Settings
-    console.log("4️⃣  Testing Plaid Link bank connection in /settings...");
-    await page.goto(`${webUrl}/settings?tab=roundup`, { waitUntil: "networkidle" });
-    await page.getByRole("button", { name: /Link Bank Account/i }).click();
-    await page.locator("span", { hasText: "Plaid Link" }).first().waitFor({ timeout: 10000 });
-    await page.getByRole("button", { name: /Plaid Sandbox Bank/i }).click();
-    await page.locator("#bank-username").fill("plaid_user");
-    await page.locator("#bank-password").fill("plaid_secret_pass");
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.fill("#email", "demo@example.com");
+    await page.fill("#password", "password123");
     await page.getByRole("button", { name: /Sign In/i }).click();
-    await page.getByRole("button", { name: /Plaid Sandbox Checking/i }).click();
-    await page.getByRole("heading", { name: /Account Linked!/i }).waitFor({ timeout: 10000 });
-    await page.getByRole("button", { name: /Go to Dashboard/i }).click();
-    await page
-      .getByText(/Plaid Sandbox Checking/i)
-      .first()
-      .waitFor({ timeout: 10000 });
-    console.log("   ✓ Plaid Sandbox Checking linked");
+    await page.getByText(/ESG Portfolio \(Alpaca\)/i).waitFor({ timeout: 10000 });
 
-    // 5. Visit Profile & Dashboard
-    console.log("5️⃣  Verifying /profile and /dashboard...");
-    await page.goto(`${webUrl}/profile`, { waitUntil: "networkidle" });
-    await page.goto(`${webUrl}/dashboard`, { waitUntil: "networkidle" });
-    console.log("   ✓ Profile and Partner Dashboard rendered cleanly");
+    // Link bank via Plaid
+    await page.getByRole("button", { name: /Bank & ESG Basket/i }).click();
+    await page.getByRole("button", { name: /Link Bank with Plaid/i }).click();
+    await page.getByRole("button", { name: /Plaid Sandbox Bank/i }).click();
+    await page.getByText(/Plaid Sandbox Bank — Checking/i).waitFor({ timeout: 10000 });
+
+    // Sync Plaid transactions & Invest via Alpaca
+    await page.getByRole("button", { name: /^Portfolio$/i }).click();
+    await page.getByRole("button", { name: /Sync Plaid Transactions/i }).click();
+    await page.getByText(/Blue Bottle Coffee/i).waitFor({ timeout: 10000 });
+    await page.getByRole("button", { name: /Invest via Alpaca/i }).click();
+    await page.getByText(/Submitted \$5\.15 to Alpaca/i).waitFor({ timeout: 10000 });
 
     if (pageErrors.length > 0) {
-      throw new Error(`Uncaught page errors during E2E flow:\n${pageErrors.join("\n")}`);
+      throw new Error(`Uncaught page errors:\n${pageErrors.join("\n")}`);
     }
-
-    console.log("\n✅ All Playwright E2E flow steps passed!");
+    console.log("✅ Playwright E2E flow passed!");
   } finally {
     const video = page.video();
     await context.close();
     await browser.close();
-    if (localServer) localServer.close();
-
+    server.close();
     if (video) {
       const rawPath = await video.path();
-      const targetRecording = path.join(RECORDINGS_DIR, "e2e-playwright-flow.webm");
-      fs.renameSync(rawPath, targetRecording);
-      console.log(`🎥 Saved E2E recording: ${targetRecording}`);
+      const target = path.join(RECORDINGS_DIR, "e2e-playwright-flow.webm");
+      fs.renameSync(rawPath, target);
+      console.log(`🎥 Saved recording: ${target}`);
     }
   }
 }
 
 main().catch((err) => {
-  console.error("❌ Playwright E2E flow failed:", err);
+  console.error("❌ E2E flow failed:", err);
   process.exit(1);
 });

@@ -1,28 +1,17 @@
-# NNNN. Short Title of Decision
+# NNNN. Short Title
 
-- **Status:** Proposed | Accepted | Deprecated | Superseded by [ADR-XXXX](XXXX-title.md)
+- **Status:** Proposed | Accepted | Superseded
 - **Date:** YYYY-MM-DD
-- **Deciders:** Ogechukwu Flagg-Igbo
 
 ## Context
 
-Describe the problem, constraints, trade-offs, and relevant background (technical, product, cost, latency, or compliance) that motivate this decision.
+What problem or trade-off are we deciding on?
 
 ## Decision
 
-State the chosen architecture or design clearly and concisely. Include key interfaces, data flow, or invariants where helpful.
-
-## Alternatives Considered
-
-- **Option A:** Brief description + why it was not chosen.
-- **Option B:** Brief description + why it was not chosen.
+What did we choose and why?
 
 ## Consequences
 
-### Positive
-
-- What becomes easier, faster, safer, or more maintainable?
-
-### Negative / Trade-offs
-
-- What complexity, cost, or limitations does this introduce, and how are they mitigated?
+- **Pros:**
+- **Trade-offs:**

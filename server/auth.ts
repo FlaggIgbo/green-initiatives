@@ -1,78 +1,84 @@
-import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-import { storage } from "./mongo/storage";
-import { User } from "../shared/schema-mongo";
-import { detectEnvironment, type RequestWithEnvironment } from "./environment";
-import { logger } from "./logger";
-import {
-  ADMIN_USERNAME,
-  SANDBOX_ADMIN_PASSWORD,
-  DEV_ADMIN_PASSWORD,
-  JWT_SECRET,
-} from "./constants";
+import crypto from "node:crypto";
+import type { NextFunction, Request, Response } from "express";
 
-// Exporting constants for tests that import from this file
-export { ADMIN_USERNAME, SANDBOX_ADMIN_PASSWORD, DEV_ADMIN_PASSWORD };
+const COOKIE_NAME = "gi_session";
 
-// Add user to Express Request
-declare module "express-serve-static-core" {
-  interface Request {
-    user?: User;
-  }
+function getSecret(): string {
+  return process.env.SESSION_SECRET || "dev-session-secret-change-me";
 }
 
-// Verify JWT token and return decoded payload
-function verifyToken(token: string): { userId: string } | null {
+export function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
+export function verifyPassword(password: string, stored: string): boolean {
+  const [salt, keyHex] = stored.split(":");
+  if (!salt || !keyHex) return false;
+  const derived = crypto.scryptSync(password, salt, 64);
+  const key = Buffer.from(keyHex, "hex");
+  return derived.length === key.length && crypto.timingSafeEqual(derived, key);
+}
+
+export function signSessionToken(userId: string): string {
+  const payload = Buffer.from(JSON.stringify({ uid: userId, iat: Date.now() })).toString(
+    "base64url",
+  );
+  const sig = crypto.createHmac("sha256", getSecret()).update(payload).digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+export function verifySessionToken(token: string): string | null {
+  const [payload, sig] = token.split(".");
+  if (!payload || !sig) return null;
+  const expected = crypto.createHmac("sha256", getSecret()).update(payload).digest("base64url");
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
-    return decoded;
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+      uid?: string;
+    };
+    return parsed.uid ?? null;
   } catch {
     return null;
   }
 }
 
-// JWT authentication middleware
-export async function authenticateToken(req: Request, res: Response, next: NextFunction) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-
-  if (!token) {
-    return res.status(401).json({ message: "No token provided" });
+export function parseCookie(header: string | undefined, name: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === name) return decodeURIComponent(v.join("="));
   }
+  return null;
+}
 
-  const decoded = verifyToken(token);
-  if (!decoded) {
-    return res.status(403).json({ message: "Invalid or expired token" });
+export function setSessionCookie(res: Response, userId: string): void {
+  const token = signSessionToken(userId);
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  res.setHeader(
+    "Set-Cookie",
+    `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800${secure}`,
+  );
+}
+
+export function clearSessionCookie(res: Response): void {
+  res.setHeader("Set-Cookie", `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
+
+export interface AuthedRequest extends Request {
+  userId?: string;
+}
+
+export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
+  const token = parseCookie(req.headers.cookie, COOKIE_NAME);
+  const userId = token ? verifySessionToken(token) : null;
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
   }
-
-  try {
-    const currentEnv = (req as RequestWithEnvironment).environment || detectEnvironment(req);
-
-    // Get user from DB
-    const user = await storage.getUser(decoded.userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Validate environment access
-    if (currentEnv && user.allowedEnvironment && user.allowedEnvironment !== currentEnv) {
-      logger.warn("Environment mismatch for user", {
-        userId: user.id,
-        userEnv: user.allowedEnvironment,
-        currentEnv,
-      });
-      return res.status(403).json({
-        message: "User does not have access to this environment",
-        environment: currentEnv,
-        userEnvironment: user.allowedEnvironment,
-      });
-    }
-
-    // Attach user to req
-    const { password: _, ...userWithoutPassword } = user;
-    req.user = userWithoutPassword;
-    next();
-  } catch (_error) {
-    res.status(500).json({ message: "Authentication error" });
-  }
+  req.userId = userId;
+  next();
 }
