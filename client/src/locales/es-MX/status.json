@@ -1,0 +1,9 @@
+{
+  "active": "Activo",
+  "completed": "Completado",
+  "pending": "Pendiente",
+  "cancelled": "Cancelado",
+  "approved": "Aprobado",
+  "pendingReview": "Pendiente de Revisión",
+  "rejected": "Rechazado"
+}

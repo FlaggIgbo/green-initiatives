@@ -1,0 +1,11 @@
+{
+  "generic": "Algo deu errado. Por favor, tente novamente.",
+  "network": "Erro de rede. Por favor, verifique sua conexão.",
+  "unauthorized": "Você deve estar conectado para realizar esta ação.",
+  "notFound": "O recurso solicitado não foi encontrado.",
+  "serverError": "Erro do servidor. Por favor, tente mais tarde.",
+  "loadingDashboard": "Erro ao carregar painel",
+  "loadingProjects": "Erro ao carregar projetos",
+  "unexpectedError": "Ocorreu um erro inesperado",
+  "projectNotFound": "Projeto não encontrado"
+}

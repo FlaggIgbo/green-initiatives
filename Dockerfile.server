@@ -1,0 +1,73 @@
+# Server-only Dockerfile for GreenInitiatives API
+# Deploys the Express backend independently from the frontend
+
+# Stage 1: Build the server
+FROM node:20-alpine AS builder
+
+# Upgrade npm to latest version
+RUN npm install -g npm@latest
+
+# Install build dependencies
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies (including dev dependencies for build)
+# Skip prepare script since we don't need git hooks in Docker
+RUN npm ci --ignore-scripts
+
+# Copy source code (server + shared only)
+COPY server/ ./server/
+COPY shared/ ./shared/
+COPY tsconfig.json ./
+
+# Build the server only
+RUN npx esbuild server/index.ts --platform=node --bundle --format=esm --outdir=dist --packages=external
+
+# Stage 2: Production image
+FROM node:20-alpine
+
+# Upgrade npm to latest version
+RUN npm install -g npm@latest
+
+# Install production dependencies
+RUN apk add --no-cache dumb-init
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install only production dependencies needed at runtime
+# Skip prepare script (husky) since we don't need git hooks in Docker
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+
+# Copy built server from builder stage
+COPY --from=builder /app/dist ./dist
+
+# Create a non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+# Change ownership of the app directory
+RUN chown -R nodejs:nodejs /app
+
+USER nodejs
+
+# Expose the port (Cloud Run uses PORT env var)
+EXPOSE 8000
+
+ENV NODE_ENV=production
+
+# Indicate this is server-only (no static file serving expected)
+ENV SERVE_STATIC=false
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start the application
+CMD ["node", "dist/index.js"]
+

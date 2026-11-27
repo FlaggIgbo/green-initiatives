@@ -1,0 +1,16 @@
+{
+  "home": "Home",
+  "projects": "Projects",
+  "createProject": "Create Project",
+  "signIn": "Sign In",
+  "signUp": "Sign Up",
+  "signOut": "Sign Out",
+  "myProfile": "My Profile",
+  "profile": "My Profile",
+  "settings": "Settings",
+  "feedback": "Feedback",
+  "dashboard": "Dashboard",
+  "role": "Role",
+  "menuDescription": "Navigation menu for environmental projects",
+  "openMenu": "Open menu"
+}

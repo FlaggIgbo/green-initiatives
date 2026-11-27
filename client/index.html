@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1, maximum-scale=1" />
+    <meta name="referrer" content="no-referrer-when-downgrade" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Berry Bank Green Hub</title>
+  </head>
+  <body>
+    <script>
+      (function() {
+        var theme = localStorage.getItem('greenhub-theme');
+        var resolved = theme === 'dark' ? 'dark' : theme === 'light' ? 'light' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.classList.add(resolved);
+      })();
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

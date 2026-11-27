@@ -1,0 +1,16 @@
+{
+  "home": "Inicio",
+  "projects": "Proyectos",
+  "createProject": "Crear Proyecto",
+  "signIn": "Iniciar Sesión",
+  "signUp": "Registrarse",
+  "signOut": "Cerrar Sesión",
+  "myProfile": "Mi Perfil",
+  "profile": "Mi Perfil",
+  "settings": "Configuración",
+  "feedback": "Comentarios",
+  "dashboard": "Panel de Control",
+  "role": "Rol",
+  "menuDescription": "Menú de navegación para proyectos ambientales",
+  "openMenu": "Abrir menú"
+}

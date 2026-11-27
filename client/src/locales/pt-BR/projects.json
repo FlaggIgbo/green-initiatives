@@ -1,0 +1,73 @@
+{
+  "title": "Explorar Projetos",
+  "noProjects": "Nenhum projeto encontrado",
+  "createNew": "Criar Novo Projeto",
+  "viewDetails": "Ver Detalhes",
+  "fundingGoal": "Meta de Financiamento",
+  "currentFunding": "Financiamento Atual",
+  "location": "Localização",
+  "category": "Categoria",
+  "status": "Status",
+  "marketplace": {
+    "title": "Mercado de Projetos",
+    "subtitle": "Descubra, financie e acompanhe projetos ambientais na sua comunidade",
+    "submitProject": "Enviar Projeto",
+    "loadingProjects": "Carregando projetos ambientais...",
+    "activeProjects": "Projetos Ativos",
+    "totalFunding": "Financiamento Total",
+    "treesPlanted": "Árvores Plantadas",
+    "communityMembers": "Membros da Comunidade",
+    "roundUp": {
+      "title": "Habilitar Arredondamento para Sustentabilidade",
+      "description": "Arredonde automaticamente suas transações para o dólar mais próximo e doe a diferença para projetos ambientais. Pequena mudança, grande impacto!",
+      "enableNow": "Habilitar Agora",
+      "enabled": "Suas compras estão ajudando o meio ambiente! 🌱",
+      "disabled": "Habilite para doar troco das transações"
+    },
+    "search": {
+      "placeholder": "Buscar projetos por nome, descrição ou localização...",
+      "sortBy": "Ordenar por",
+      "nearest": "Mais Próximos de Você",
+      "trending": "Mais Populares",
+      "newest": "Mais Recentes",
+      "funding": "Progresso de Financiamento",
+      "impact": "Maior Impacto"
+    },
+    "filters": {
+      "title": "Filtros",
+      "distance": "Distância",
+      "distanceDescription": "Mostrar projetos dentro de {{distance}}km da sua localização",
+      "fundedOnly": "Apenas Totalmente Financiados",
+      "fundedOnlyDescription": "Mostrar apenas projetos que atingiram sua meta de financiamento",
+      "roundUpEnabled": "Arredondamento Habilitado"
+    },
+    "categories": {
+      "all": "Todos os Projetos",
+      "reforestation": "Reflorestamento",
+      "water": "Água e Oceanos",
+      "energy": "Energia Limpa",
+      "waste": "Redução de Resíduos"
+    },
+    "map": {
+      "title": "Localizações dos Projetos",
+      "projectsInArea": "{{count}} projetos na sua área",
+      "clickMarkers": "📍 Clique nos marcadores para ver detalhes do projeto e progresso de financiamento"
+    },
+    "grid": {
+      "viewAll": "Ver Todos",
+      "noProjectsFound": "Nenhum projeto encontrado",
+      "adjustFilters": "Tente ajustar seus filtros ou termos de busca",
+      "resetFilters": "Redefinir Filtros"
+    },
+    "community": {
+      "title": "Impacto da Comunidade",
+      "subtitle": "Veja como a comunidade está fazendo a diferença juntos",
+      "yourImpact": "Seu Impacto Este Mês",
+      "yourImpactDescription": "Suas compras ajudaram a plantar 12 árvores e limpar 5kg de plástico do oceano",
+      "activeContributor": "Contribuidor Ativo",
+      "treesThisWeek": "Árvores Plantadas Esta Semana",
+      "raisedThisMonth": "Arrecadado Este Mês",
+      "averageProgress": "Progresso Médio de Financiamento"
+    }
+  }
+}

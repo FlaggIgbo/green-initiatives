@@ -1,0 +1,106 @@
+# Google Cloud Build configuration for SERVER - PRODUCTION environment
+# Triggered MANUALLY or on tags/releases (server changes only)
+# Deploys to: greeninitiatives-server-prod Cloud Run service
+#
+# Prerequisites:
+#   gcloud artifacts repositories create greeninitiatives \
+#     --repository-format=docker \
+#     --location=us-central1 \
+#     --description="GreenInitiatives Docker images"
+
+steps:
+  # Build the server Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    dir: 'GreenInitiatives'
+    args: 
+      - 'build'
+      - '-f'
+      - 'Dockerfile.server'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:$_SHORT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:latest'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:$_TAG_NAME'
+      - '.'
+    timeout: 1200s
+
+  # Push all tagged images
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:$_SHORT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:latest'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:$_TAG_NAME'
+
+  # Deploy to Cloud Run (PRODUCTION)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'greeninitiatives-server-prod'
+      - '--image'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:$_SHORT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--port'
+      - '8000'
+      - '--memory'
+      - '1Gi'
+      - '--cpu'
+      - '2'
+      - '--min-instances'
+      - '1'
+      - '--max-instances'
+      - '20'
+      - '--timeout'
+      - '60s'
+      - '--startup-probe=httpGet.path=/health'
+      - '--liveness-probe=httpGet.path=/health'
+      - '--set-env-vars'
+      - 'NODE_ENV=production,DB_NAME=greenInitiatives,SERVE_STATIC=false,APP_VERSION=$_TAG_NAME,STRIPE_DISABLED=true,EMAIL_OTP_ENABLED=false'
+      - '--set-secrets'
+      - 'MONGODB_URI=mongodb-uri:latest,JWT_SECRET=jwt-secret-prod:latest,STRIPE_SECRET_KEY=stripe-secret-key-prod:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret-prod:latest,ROUNDUP_CRON_SECRET=roundup-cron-secret-prod:latest,RESEND_API_KEY=resend-api-key:latest'
+      - '--labels'
+      - 'environment=production,component=server'
+
+  # Post deployment summary
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        SERVICE_URL=$$(gcloud run services describe greeninitiatives-server-prod \
+          --region us-central1 \
+          --format 'value(status.url)')
+        echo "✅ Server Production deployed successfully!"
+        echo "📍 API URL: $$SERVICE_URL"
+        echo "🏷️  Version: $_TAG_NAME ($_SHORT_SHA)"
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:$_SHORT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:latest'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/greeninitiatives/server-prod:$_TAG_NAME'
+
+timeout: 1800s
+
+substitutions:
+  _SHORT_SHA: 'unknown'
+  _TAG_NAME: 'manual'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+

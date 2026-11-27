@@ -1,0 +1,6 @@
+#!/bin/sh
+# Commitlint: enforce conventional commits (feat:, fix:, chore:, etc.)
+# See https://commitlint.js.org/
+# Run from GreenInitiatives so config and node_modules are found
+COMMIT_MSG_FILE="$(git rev-parse --show-toplevel)/.git/COMMIT_EDITMSG"
+cd GreenInitiatives && npx --no -- commitlint --edit "$COMMIT_MSG_FILE"

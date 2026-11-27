@@ -1,0 +1,11 @@
+{
+  "generic": "Algo salió mal. Por favor, inténtalo nuevamente.",
+  "network": "Error de red. Por favor, verifica tu conexión.",
+  "unauthorized": "Debes iniciar sesión para realizar esta acción.",
+  "notFound": "No se encontró el recurso solicitado.",
+  "serverError": "Error del servidor. Por favor, inténtalo más tarde.",
+  "loadingDashboard": "Error al cargar el panel",
+  "loadingProjects": "Error al cargar proyectos",
+  "unexpectedError": "Ocurrió un error inesperado",
+  "projectNotFound": "Proyecto no encontrado"
+}

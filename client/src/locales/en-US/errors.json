@@ -1,0 +1,11 @@
+{
+  "generic": "Something went wrong. Please try again.",
+  "network": "Network error. Please check your connection.",
+  "unauthorized": "You must be signed in to perform this action.",
+  "notFound": "The requested resource was not found.",
+  "serverError": "Server error. Please try again later.",
+  "loadingDashboard": "Error loading dashboard",
+  "loadingProjects": "Error loading projects",
+  "unexpectedError": "An unexpected error occurred",
+  "projectNotFound": "Project not found"
+}

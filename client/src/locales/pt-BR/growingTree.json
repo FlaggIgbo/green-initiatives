@@ -1,0 +1,11 @@
+{
+  "growthProgress": "Progresso de Crescimento",
+  "sunwaterCoins": "Moedas Sunwater",
+  "waterTree": "Regar Árvore 🌧️",
+  "watering": "Regando...",
+  "treeWatered": "Árvore regada! 🌧️",
+  "treeWateredDescription": "Sua árvore cresceu 5%! Continue cuidando dela.",
+  "unableToWater": "Não foi possível regar a árvore",
+  "waterTooltip": "Regue sua árvore por 10 moedas",
+  "needCoinsTooltip": "Precisa de 10 moedas para regar (você tem {{coins}})"
+}
