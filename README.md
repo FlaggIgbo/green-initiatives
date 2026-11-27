@@ -114,7 +114,7 @@ This app adopts high-impact patterns from Next.js and adheres to modern deployme
 7.  **State**: Normalized project data using `createEntityAdapter` for O(1) lookups.
 8.  **SEO**: Dynamic metadata injection via `useSEO`.
 9.  **Geocoding**: Internal proxy for address lookups to bypass CORS/Rate-limits.
-10. **Round-Up Donations**: Acorns-style bank linking via Teller Connect; round-ups accumulate until $5, then flush to projects via Cloud Scheduler cron (with bypass mode for development/test pipelines).
+10. **Round-Up Donations**: Acorns-style bank linking via Plaid Link; round-ups accumulate until $5, then flush to projects via Cloud Scheduler cron (with bypass mode for development/test pipelines).
 
 ### 🔄 Round-up Donation Flow
 

@@ -2,6 +2,54 @@ import Stripe from "stripe";
 import { storage } from "../mongo/storage";
 import { projectService } from "./project.service";
 import { logger } from "../logger";
+import type { RoundUpMultiplierRule } from "@shared/schema-mongo";
+
+export interface TransactionClassificationResult {
+  category: string;
+  multiplier: number;
+  estimatedCarbonGrams: number;
+  classifierSource: "rules" | "llm" | "fallback";
+}
+
+/**
+ * Hybrid Transaction Classification & Carbon-Adjusted Multiplier (Stub)
+ * TODO:
+ * 1. Run fast deterministic merchant/MCC rules first (e.g., Shell, Delta, Uber, Whole Foods)
+ * 2. Fall back to lightweight LLM/embedding classifier for messy bank statement strings
+ * 3. Apply user's dynamic RoundUpMultiplierRule (e.g., 2x gas/airlines, 1x groceries, or flight CO2 match)
+ * 4. Gracefully degrade to 1x multiplier if external AI API times out
+ */
+export async function classifyTransactionAndMultiplier(_input: {
+  merchantName?: string;
+  description: string;
+  mcc?: string;
+  amountCents: number;
+  userRules?: RoundUpMultiplierRule[];
+}): Promise<TransactionClassificationResult> {
+  // TODO: Replace stub with rules-first + LLM-fallback pipeline
+  return {
+    category: "uncategorized",
+    multiplier: 1,
+    estimatedCarbonGrams: 0,
+    classifierSource: "fallback",
+  };
+}
+
+/**
+ * Market-Hours Aware Flush Worker for Fractional ESG Investing (Stub)
+ * TODO:
+ * 1. Check `alpacaService.isMarketOpen()` — queue weekend/after-hours flushes as PENDING_SETTLEMENT
+ * 2. Use `ledgerService.recordLedgerEntry()` + `idempotencyKey` inside a MongoDB transaction
+ * 3. Route notional splits to `alpacaService.executeBasketOrders()` (or charitable projects)
+ * 4. Trigger `projectService.generateRoundUpImpactDigest()` on settlement
+ */
+export async function enqueueOrExecuteFlush(
+  _userId: string,
+  _amountCents: number,
+  _idempotencyKey: string,
+): Promise<{ status: "QUEUED" | "INVESTED" | "FAILED" }> {
+  throw new Error("TODO: Implement enqueueOrExecuteFlush with LedgerService + AlpacaService");
+}
 
 let stripeInstance: Stripe;
 
@@ -63,6 +111,10 @@ export async function processTransaction(
     return { processed: false, roundUpCents };
   }
 
+  // TODO(Plaid + AI + Ledger):
+  // 1. Call `classifyTransactionAndMultiplier()` to apply carbon-adjusted 1x/2x/3x multipliers
+  // 2. Replace mutable `addRoundUpBalance()` with `ledgerService.recordLedgerEntry()` using
+  //    plaidTransactionId as the idempotency key inside a MongoDB transaction
   // Accumulate round-up (Acorns-style: donate when >= $5)
   const newBalanceCents = await storage.addRoundUpBalance(userId, roundUpCents);
 
@@ -132,7 +184,9 @@ export async function processRefreshedTransactions(
 /**
  * Flush accumulated round-up balances >= $5 (Acorns-style).
  * Call from cron (e.g. Cloud Scheduler → /api/cron/flush-roundups).
- * TODO: Add Stripe PaymentIntent/ACH to charge user before processFunding when ready.
+ * TODO(Alpaca + Ledger): Swap project funding loop for `enqueueOrExecuteFlush()` with
+ * idempotency keys, double-entry ledger transitions, market-hours queueing (9:35 AM ET),
+ * and fractional ESG ETF execution via AlpacaService.
  */
 export async function flushRoundUpBalances(
   bypassStripeCheck = false,

@@ -19,7 +19,7 @@ Access at **http://localhost:8000** (server serves both API and frontend)
 - **Routing**: React Router 7 (with Nested Layouts)
 - **State Management**: Redux Toolkit (with 5-min caching)
 - **Icons**: Lucide React + React Icons
-- **Payments**: @stripe/stripe-js for secure checkout redirection and **Teller Connect** (bank linking for round-up donations)
+- **Payments**: @stripe/stripe-js for secure checkout redirection and **Plaid Link** (bank linking for round-up donations/investing)
 - **Maps**: React Leaflet (with Backend Geocoding Proxy)
 - **i18n**: Custom hook with multi-locale JSON support
 
@@ -31,7 +31,7 @@ graph TD
     B --> C[Enable Switch]
     B --> D[Bank Link Controller]
     B --> E[Project Selector]
-    D -->|Clicks 'Link Bank Account'| F[Teller Connect Dialog]
+    D -->|Clicks 'Link Bank Account'| F[Plaid Link Dialog]
     F -->|Selects Bank| G[Bank selection step]
     G -->|Enters Credentials| H[Login step]
     H -->|Selects Account| I[Accounts list step]
@@ -81,7 +81,7 @@ Dynamic management of `document.title` and `<meta>` tags (OG, Description) for i
 | `/project/:id`      | Public       | Project details                                                      |
 | `/project/:id/edit` | Entity/Admin | Edit project details                                                 |
 | `/profile`          | User         | Personal impact dashboard, round-up summary                          |
-| `/settings`         | User         | Round-up projects, bank linking (Teller Connect)                     |
+| `/settings`         | User         | Round-up projects, bank linking (Plaid Link)                         |
 | `/dashboard`        | Entity/Admin | Partner management dashboard                                         |
 | `/create`           | Entity/Admin | Project submission form                                              |
 | `/auth`             | Public       | Login / registration                                                 |

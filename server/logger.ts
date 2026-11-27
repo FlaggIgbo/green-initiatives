@@ -80,6 +80,25 @@ function log(level: LogLevel, message: string, meta?: Record<string, unknown>): 
   }
 }
 
+export interface AiTelemetryEvent {
+  feature:
+    | "project_vetting"
+    | "transaction_classification"
+    | "esg_screener"
+    | "portfolio_rebalancer"
+    | "comment_moderation"
+    | "impact_digest"
+    | "embedding";
+  model: string;
+  userId?: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  estimatedCostUsd?: number;
+  usedFallback?: boolean;
+  success: boolean;
+}
+
 /**
  * Logger object with methods for each log level.
  *
@@ -127,6 +146,15 @@ export const logger = {
    */
   critical: (message: string, meta?: Record<string, unknown>): void => {
     log("CRITICAL", message, meta);
+  },
+
+  /**
+   * Structured AI observability hook for token usage, model latency, fallback rates,
+   * and per-user AI spend in GCP Cloud Logging / Monitoring.
+   * TODO: Wire GCP log-based metrics + budget/rate-limit alerts on `aiTelemetry.*` fields.
+   */
+  logAiTelemetry: (event: AiTelemetryEvent): void => {
+    log("INFO", `AI telemetry: ${event.feature}`, { aiTelemetry: event });
   },
 };
 

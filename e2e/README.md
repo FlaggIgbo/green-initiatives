@@ -62,14 +62,14 @@ See the `TODO` comments in each spec file for suggested tests to add:
 - **auth.spec.ts** — Full login flow, register entity, forgot/reset password
 - **projects.spec.ts** — Project cards, funding, map, comments, 404
 - **not-found.spec.ts** — Error boundary, offline handling
-- **bank-linking.spec.ts** — E2E Teller Connect bank account linking, round-up project selection, and programmatic Cloud Scheduler cron flush verification.
+- **bank-linking.spec.ts** — E2E Plaid Link bank account linking, round-up project selection, and programmatic Cloud Scheduler cron flush verification.
 
 ## 🔄 E2E Test Verification Flow
 
 ```mermaid
 graph TD
     Start[Begin bank-linking.spec.ts] --> Step1[1. Authenticate & Navigate to Settings]
-    Step1 --> Step2[2. E2E Teller Connect Dialog Simulation]
+    Step1 --> Step2[2. E2E Plaid Link Dialog Simulation]
     Step2 --> Step3[3. Verify bank details are listed in settings]
     Step3 --> Step4[4. Toggle Round-up switch ON & Add target projects]
     Step4 --> Step5[5. Save preferences & assert success toast]

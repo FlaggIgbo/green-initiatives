@@ -1,6 +1,9 @@
 import { useMemo } from "react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from "recharts";
 
+// TODO(Alpaca Portfolio): Upgrade FundingBreakdownChart to render live ESG ETF sleeve weights
+// (e.g., ICLN, TAN, NEE, ESGU, PHO, WM) and unrealized P&L from GET /api/portfolio/positions.
+
 export interface FundingBreakdownItem {
   name: string;
   value: number;

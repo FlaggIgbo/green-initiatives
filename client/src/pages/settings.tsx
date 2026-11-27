@@ -78,9 +78,11 @@ export default function Settings() {
   const [feedbackMessage, setFeedbackMessage] = useState("");
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
 
-  // Teller Connect States
-  const [isTellerOpen, setIsTellerOpen] = useState(false);
-  const [tellerStep, setTellerStep] = useState<
+  // Plaid Link States
+  // TODO: Replace simulated dialog state with react-plaid-link (`usePlaidLink`) once
+  // POST /api/roundup/plaid/link-token and /api/roundup/plaid/exchange-token are wired up.
+  const [isPlaidOpen, setIsPlaidOpen] = useState(false);
+  const [plaidStep, setPlaidStep] = useState<
     "bank-select" | "login" | "accounts" | "loading" | "success"
   >("bank-select");
   const [selectedBank, setSelectedBank] = useState<string | null>(null);
@@ -168,11 +170,12 @@ export default function Settings() {
   };
 
   const handleLinkBank = async () => {
+    // TODO: Call createPlaidLinkToken() and open Plaid Link widget instead of the simulated dialog
     setSelectedBank(null);
     setBankUsername("");
     setBankPassword("");
-    setTellerStep("bank-select");
-    setIsTellerOpen(true);
+    setPlaidStep("bank-select");
+    setIsPlaidOpen(true);
   };
 
   const handleUnlink = async (stripeAccountId: string) => {
@@ -294,7 +297,7 @@ export default function Settings() {
                 <Label>Linked Bank Accounts</Label>
                 <p className="text-sm text-muted-foreground">
                   Connect your bank to enable round-up donations. Transactions are monitored via
-                  Teller.
+                  Plaid.
                 </p>
                 {isLoadingAccounts ? (
                   <div className="flex items-center gap-2 text-muted-foreground">
@@ -673,14 +676,14 @@ export default function Settings() {
         </TabsContent>
       </Tabs>
 
-      {/* Teller Connect Simulated Dialog */}
-      <Dialog open={isTellerOpen} onOpenChange={setIsTellerOpen}>
+      {/* Plaid Link Simulated Dialog */}
+      <Dialog open={isPlaidOpen} onOpenChange={setIsPlaidOpen}>
         <DialogContent className="sm:max-w-[420px] p-0 overflow-hidden bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl">
           <div className="bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 p-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Landmark className="h-5 w-5 text-emerald-600 dark:text-emerald-500" />
               <span className="font-bold text-zinc-900 dark:text-zinc-50 text-sm tracking-wide uppercase">
-                Teller Connect
+                Plaid Link
               </span>
             </div>
             <div className="text-[10px] bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 font-semibold px-2 py-0.5 rounded-full uppercase">
@@ -688,7 +691,7 @@ export default function Settings() {
             </div>
           </div>
 
-          {tellerStep === "bank-select" && (
+          {plaidStep === "bank-select" && (
             <div className="p-6 space-y-4">
               <div className="text-center">
                 <h3 className="text-lg font-bold text-zinc-900 dark:text-zinc-50">
@@ -701,7 +704,7 @@ export default function Settings() {
 
               <div className="grid grid-cols-2 gap-3 pt-2">
                 {[
-                  { name: "Teller Sandbox Bank", color: "bg-emerald-500/10 text-emerald-600" },
+                  { name: "Plaid Sandbox Bank", color: "bg-emerald-500/10 text-emerald-600" },
                   { name: "Chase", color: "bg-blue-500/10 text-blue-600" },
                   { name: "Bank of America", color: "bg-red-500/10 text-red-600" },
                   { name: "Wells Fargo", color: "bg-amber-500/10 text-amber-600" },
@@ -713,7 +716,7 @@ export default function Settings() {
                     type="button"
                     onClick={() => {
                       setSelectedBank(bank.name);
-                      setTellerStep("login");
+                      setPlaidStep("login");
                     }}
                     className="flex flex-col items-center justify-center p-4 border border-zinc-200 dark:border-zinc-800 rounded-lg hover:border-emerald-500 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-all text-center group"
                   >
@@ -731,11 +734,11 @@ export default function Settings() {
             </div>
           )}
 
-          {tellerStep === "login" && (
+          {plaidStep === "login" && (
             <div className="p-6 space-y-4">
               <button
                 type="button"
-                onClick={() => setTellerStep("bank-select")}
+                onClick={() => setPlaidStep("bank-select")}
                 className="text-xs text-zinc-500 hover:text-zinc-700 flex items-center gap-1"
               >
                 ← Back to banks
@@ -788,9 +791,9 @@ export default function Settings() {
 
               <Button
                 onClick={() => {
-                  setTellerStep("loading");
+                  setPlaidStep("loading");
                   setTimeout(() => {
-                    setTellerStep("accounts");
+                    setPlaidStep("accounts");
                   }, 1500);
                 }}
                 disabled={!bankUsername || !bankPassword}
@@ -801,7 +804,7 @@ export default function Settings() {
             </div>
           )}
 
-          {tellerStep === "loading" && (
+          {plaidStep === "loading" && (
             <div className="p-8 flex flex-col items-center justify-center space-y-4">
               <Loader2 className="h-8 w-8 animate-spin text-emerald-600 dark:text-emerald-500" />
               <div className="text-center">
@@ -815,7 +818,7 @@ export default function Settings() {
             </div>
           )}
 
-          {tellerStep === "accounts" && (
+          {plaidStep === "accounts" && (
             <div className="p-6 space-y-4">
               <div className="text-center">
                 <h3 className="text-lg font-bold text-zinc-900 dark:text-zinc-50">
@@ -828,27 +831,27 @@ export default function Settings() {
 
               <div className="space-y-2 pt-2">
                 {[
-                  { id: "1", name: "Teller Sandbox Checking", mask: "1234", balance: "$4,520.12" },
-                  { id: "2", name: "Teller Sandbox Savings", mask: "5678", balance: "$12,482.00" },
+                  { id: "1", name: "Plaid Sandbox Checking", mask: "1234", balance: "$4,520.12" },
+                  { id: "2", name: "Plaid Sandbox Savings", mask: "5678", balance: "$12,482.00" },
                 ].map((account) => (
                   <button
                     key={account.id}
                     type="button"
                     onClick={async () => {
-                      setTellerStep("loading");
+                      setPlaidStep("loading");
                       try {
                         await createMockLinkAccount({
                           displayName: account.name,
-                          institutionName: selectedBank || "Teller Sandbox Bank",
+                          institutionName: selectedBank || "Plaid Sandbox Bank",
                           last4: account.mask,
                         });
-                        setTellerStep("success");
+                        setPlaidStep("success");
                         // Refresh accounts list immediately
                         fetchLinkedAccounts();
                       } catch (err) {
                         console.error("[Settings] Failed mock linking:", err);
                         toast.error("Failed to link mock bank account");
-                        setTellerStep("accounts");
+                        setPlaidStep("accounts");
                       }
                     }}
                     className="w-full flex items-center justify-between p-4 border border-zinc-200 dark:border-zinc-800 rounded-lg hover:border-emerald-500 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-all text-left"
@@ -868,7 +871,7 @@ export default function Settings() {
             </div>
           )}
 
-          {tellerStep === "success" && (
+          {plaidStep === "success" && (
             <div className="p-6 space-y-6 text-center">
               <div className="h-16 w-16 bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center font-bold text-2xl mx-auto">
                 ✓
@@ -878,13 +881,13 @@ export default function Settings() {
                   Account Linked!
                 </h3>
                 <p className="text-xs text-zinc-500 mt-1">
-                  Your bank account has been connected via Teller. Daily transactions will be
+                  Your bank account has been connected via Plaid. Daily transactions will be
                   monitored to round-up your spare change.
                 </p>
               </div>
               <Button
                 onClick={() => {
-                  setIsTellerOpen(false);
+                  setIsPlaidOpen(false);
                   dispatch(checkAuth());
                 }}
                 className="w-full h-10 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"

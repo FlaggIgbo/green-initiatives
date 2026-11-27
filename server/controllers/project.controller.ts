@@ -54,6 +54,10 @@ export class ProjectController {
 
     const currentEnv = req.environment;
     const project = await storage.createProject(projectData, currentEnv);
+
+    // TODO(AI Vetting): Trigger `projectService.enqueueProjectVettingJob(project.id, docUrls)`
+    // asynchronously whenever supportingDocuments are attached to build the admin triage scorecard.
+
     res.json(project);
   });
 
@@ -78,6 +82,10 @@ export class ProjectController {
     }
 
     const updatedProject = await storage.updateProject(projectId, req.body as UpdateProject);
+
+    // TODO(RAG): Re-sync vector embeddings via `projectService.generateProjectEmbedding(updatedProject)`
+    // when title, description, or proposal.methodology changes on an approved project.
+
     res.json(updatedProject);
   });
 
@@ -90,6 +98,9 @@ export class ProjectController {
     const { status } = req.body;
 
     const project = await storage.updateProjectApprovalStatus(String(req.params.id), status);
+
+    // TODO(RAG): When `status === "approved"`, generate embeddings via `projectService.generateProjectEmbedding(project)`.
+
     res.json(project);
   });
 
@@ -146,6 +157,32 @@ export class ProjectController {
     res.json({
       ...result,
       method,
+    });
+  });
+
+  /**
+   * GET /api/projects/search?q=...&lat=...&lng=...&maxDistanceKm=...
+   * TODO: Wire to `projectService.hybridSearchProjects()` (Atlas Vector Search + geospatial filter).
+   */
+  searchProjects = asyncHandler(async (_req: RequestWithEnvironment, res: Response) => {
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Call projectService.hybridSearchProjects() using MongoDB Atlas Vector Search + $geoNear",
+    });
+  });
+
+  /**
+   * GET /api/projects/:id/vetting-scorecard
+   * TODO: Return AI-generated ProjectVettingScorecard for admin triage review.
+   */
+  getVettingScorecard = asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user || req.user.role !== "admin") {
+      res.status(403).json({ error: "Forbidden: Admin access required" });
+      return;
+    }
+    res.status(501).json({
+      error: "Not Implemented",
+      todo: "Fetch or generate ProjectVettingScorecard via documentStorageService.buildAdminTriageScorecard()",
     });
   });
 }
