@@ -63,6 +63,7 @@ export async function syncUserRoundUps(userId: string): Promise<{
 
       addedCount++;
       accruedCents += roundUpCents;
+      // TODO: Evaluate calculatePercentageDonationCents(txn, user.givingRule) and accrue to user.givingBalanceCents
     }
 
     account.syncCursor = nextCursor;
@@ -129,4 +130,21 @@ export async function flushUserRoundUps(userId: string): Promise<{
     });
     throw err;
   }
+}
+
+/**
+ * Flush accumulated percentage-based charitable giving via ACH debit,
+ * splitting settled funds between direct 501(c)(3) donation and the user's DAF.
+ */
+export async function flushUserGiving(_userId: string): Promise<{
+  transferredCents: number;
+  status: string;
+  achTransferId?: string;
+}> {
+  // TODO: Load user, check user.givingBalanceCents >= GIVING_THRESHOLD_CENTS and verify NACHA consent
+  // TODO: Deduct user.givingBalanceCents optimistically (restore on failure) and generate idempotencyKey
+  // TODO: Call initiateAchDebit(...) from ./ach.service
+  // TODO: Create DonationLedgerModel entries (ACH_PENDING) for directCharitySplitPct and dafSplitPct
+  // TODO: On ACH settlement webhook, call disburseToCharity(...) and/or contributeToDaf(...)
+  throw new Error("flushUserGiving is not implemented yet");
 }

@@ -19,6 +19,8 @@ export interface PlaidSyncedTransaction {
   amountCents: number; // Positive = debit (Plaid convention)
   pending: boolean;
   date: string;
+  // TODO: Populate personal_finance_category.primary from /transactions/sync for category-based GivingRule filtering
+  category?: string;
 }
 
 export function isPlaidConfigured(): boolean {
@@ -53,6 +55,7 @@ export async function createPlaidLinkToken(userId: string): Promise<{ linkToken:
     return { linkToken: `link-sandbox-mock-${userId}` };
   }
 
+  // TODO: Include "transfer" (or "auth") in PLAID_PRODUCTS when enabling ACH pulls for charitable giving / DAF
   const products = (process.env.PLAID_PRODUCTS || "transactions")
     .split(",")
     .map((p) => p.trim())

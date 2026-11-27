@@ -67,3 +67,53 @@ export interface RoundUpSummary {
   recentTransactions: RoundUpTransaction[];
   ledgerEntries: LedgerEntry[];
 }
+
+// Charitable Giving, DAF & Tax Document Types (IRC § 170 / § 4966)
+export type GivingDestinationType = "DIRECT_501C3" | "DAF";
+
+export interface GivingRule {
+  id: string;
+  enabled: boolean;
+  /** Basis points (e.g., 150 = 1.5% of eligible transaction amount) */
+  percentageBps: number;
+  /** Optional Plaid personal_finance_category filters (empty = all posted debits) */
+  eligibleCategories: string[];
+  /** Split between direct 501(c)(3) charity vs. tax-advantaged DAF (must sum to 100) */
+  directCharitySplitPct: number;
+  dafSplitPct: number;
+  selectedCharityEin: string;
+}
+
+export interface CharitableOrg {
+  ein: string;
+  name: string;
+  nteeCategory: string;
+  verified501c3: boolean;
+}
+
+export type DonationStatus =
+  "ACCRUED" | "ACH_PENDING" | "ACH_SETTLED" | "DISBURSED" | "FAILED" | "RETURNED";
+
+export interface DonationLedgerEntry {
+  id: string;
+  idempotencyKey: string;
+  achTransferId?: string;
+  destinationType: GivingDestinationType;
+  recipientEin: string;
+  recipientName: string;
+  amountCents: number;
+  status: DonationStatus;
+  settledAt?: string;
+  receiptUrl?: string;
+  createdAt: string;
+}
+
+export interface TaxReceiptSummary {
+  taxYear: number;
+  totalDeductibleCents: number;
+  directDonationsCents: number;
+  dafContributionsCents: number;
+  /** True if any single gift >= 25000 cents ($250) per IRC § 170(f)(8) */
+  requiresWrittenAcknowledgment: boolean;
+  generatedAt: string;
+}
