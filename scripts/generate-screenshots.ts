@@ -239,7 +239,7 @@ async function main() {
     console.log("  ✓ screenshots/pages/auth-page.png");
     await authPage.close();
 
-    // 2. Portfolio page + Settings page + Plaid dialog
+    // 2. Portfolio page + Settings page
     const page = await newPage();
     await setupMocks(page, true);
     await page.goto(baseUrl, { waitUntil: "networkidle" });
@@ -249,12 +249,6 @@ async function main() {
     await page.getByRole("button", { name: /Bank & ESG Basket/i }).click();
     await page.screenshot({ path: path.join(PAGES_DIR, "settings-page.png"), fullPage: true });
     console.log("  ✓ screenshots/pages/settings-page.png");
-
-    await page.getByRole("button", { name: /Link Bank with Plaid/i }).click();
-    const dialog = page.locator('[role="dialog"]').first();
-    await dialog.waitFor({ state: "visible" });
-    await dialog.screenshot({ path: path.join(COMPONENTS_DIR, "plaid-link-dialog.png") });
-    console.log("  ✓ screenshots/components/plaid-link-dialog.png");
     await page.close();
 
     // 3. Mobile Portfolio
@@ -265,7 +259,33 @@ async function main() {
     console.log("  ✓ screenshots/pages/portfolio-mobile.png");
     await mobile.close();
 
-    console.log("✅ Generated 5 screenshots.");
+    // 4. Isolated Component Screenshots via /?component=<id>
+    const componentIds = [
+      "alert-banner",
+      "app-header",
+      "credentials-form",
+      "passkey-challenge-card",
+      "email-otp-card",
+      "portfolio-value-card",
+      "roundup-progress-card",
+      "holdings-table",
+      "recent-transactions-list",
+      "linked-accounts-card",
+      "esg-basket-selector",
+      "passkeys-card",
+      "plaid-link-dialog",
+    ];
+    const compPage = await newPage();
+    for (const id of componentIds) {
+      await compPage.goto(`${baseUrl}/?component=${id}`, { waitUntil: "networkidle" });
+      const preview = compPage.locator('[data-testid="component-preview"]');
+      await preview.waitFor({ state: "visible" });
+      await preview.screenshot({ path: path.join(COMPONENTS_DIR, `${id}.png`) });
+      console.log(`  ✓ screenshots/components/${id}.png`);
+    }
+    await compPage.close();
+
+    console.log(`✅ Generated ${4 + componentIds.length} screenshots.`);
   } finally {
     await browser.close();
     server.close();

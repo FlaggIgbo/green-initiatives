@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { connectDb } from "./db";
+import { connectOtpRedis } from "./services/otp.service";
 import { createApiRouter } from "./routes";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -10,6 +11,7 @@ const PORT = Number(process.env.PORT || 8000);
 
 async function start() {
   await connectDb();
+  await connectOtpRedis();
 
   const app = express();
   app.use(express.json());

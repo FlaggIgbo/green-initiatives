@@ -11,7 +11,7 @@ Green Initiatives pivoted from a broad charitable-donations portal into a focuse
 
 - **Third-party integrations limited to two:** **Plaid** (bank linking & transaction sync) and **Alpaca Trading API** (fractional ESG ETF orders & portfolio positions), both called with native `fetch()`.
 - **Native Node.js wherever possible:** `node:crypto` (`scryptSync` + HMAC-SHA256 cookies) for auth, `node:test` for unit tests, `--env-file-if-exists=.env` for env loading.
-- **MERN core:** MongoDB (`mongoose` + `mongodb-memory-server` fallback), Express, React + Tailwind CSS, Node.js.
+- **MERN core:** MongoDB (`mongoose` via Docker locally or managed URI in production), Redis (`redis` for OTP/MFA cache), Express, React + Tailwind CSS, Node.js.
 
 ## Consequences
 

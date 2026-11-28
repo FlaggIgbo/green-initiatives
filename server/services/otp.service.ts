@@ -7,7 +7,8 @@
  *  - Atomic single-use consumption via Redis Lua compare-and-delete (prevents replay races).
  *  - Failed attempts preserve remaining TTL via Redis `KEEPTTL` and lock out after 5 failures.
  *  - Single-use `mfaToken` JTI revocation stored in Redis until token expiry (`SET ... NX EX`).
- *  - Falls back to an in-memory TTL store when REDIS_URL is unset, and console logging when SMTP_HOST is unset.
+ *  - Always connects to the configured `REDIS_URL` (Docker locally, live Redis in production).
+ *  - Console logging is used for SMTP delivery when `SMTP_HOST` is unset.
  */
 import crypto from "node:crypto";
 import nodemailer, { type Transporter } from "nodemailer";
@@ -129,163 +130,15 @@ end
 return {1, 0, 0}
 `;
 
-/** In-memory TTL fallback used when REDIS_URL is not set (local dev / unit tests). */
-export class InMemoryOtpCacheStore implements OtpCacheStore {
-  private otpMap = new Map<string, { value: OtpRecord; expiresAt: number }>();
-  private cooldownMap = new Map<string, number>();
-  private windowMap = new Map<string, { count: number; expiresAt: number }>();
-  private revokedJtiMap = new Map<string, number>();
-
-  async set(key: string, value: OtpRecord, ttlSeconds: number): Promise<void> {
-    this.otpMap.set(key, { value: { ...value }, expiresAt: Date.now() + ttlSeconds * 1000 });
-  }
-
-  async get(key: string): Promise<OtpRecord | null> {
-    const entry = this.otpMap.get(key);
-    if (!entry) return null;
-    if (entry.expiresAt <= Date.now()) {
-      this.otpMap.delete(key);
-      return null;
-    }
-    return { ...entry.value };
-  }
-
-  async del(key: string): Promise<void> {
-    this.otpMap.delete(key);
-  }
-
-  /** Exposed for tests verifying KEEPTTL preserves the original expiry timestamp. */
-  getExpiresAt(key: string): number | null {
-    const entry = this.otpMap.get(key);
-    if (!entry || entry.expiresAt <= Date.now()) return null;
-    return entry.expiresAt;
-  }
-
-  async compareAndDelete(key: string, expectedCodeHash: string): Promise<boolean> {
-    const entry = this.otpMap.get(key);
-    if (!entry || entry.expiresAt <= Date.now()) {
-      this.otpMap.delete(key);
-      return false;
-    }
-    if (entry.value.codeHash !== expectedCodeHash) return false;
-    this.otpMap.delete(key);
-    return true;
-  }
-
-  async incrementAttemptsKeepTtl(
-    key: string,
-    maxAttempts: number,
-  ): Promise<"missing" | "locked" | "incremented"> {
-    const entry = this.otpMap.get(key);
-    if (!entry || entry.expiresAt <= Date.now()) {
-      this.otpMap.delete(key);
-      return "missing";
-    }
-    const nextAttempts = entry.value.attempts + 1;
-    if (nextAttempts >= maxAttempts) {
-      this.otpMap.delete(key);
-      return "locked";
-    }
-    // Preserve entry.expiresAt (KEEPTTL semantics)
-    entry.value = { ...entry.value, attempts: nextAttempts };
-    return "incremented";
-  }
-
-  async acquireSendSlot(params: {
-    userId: string;
-    ip?: string;
-    cooldownSeconds: number;
-    windowSeconds: number;
-    maxPerWindow: number;
-  }): Promise<SendSlotResult> {
-    const now = Date.now();
-    const cooldownKey = `otp:cooldown:${params.userId}`;
-    const cooldownExp = this.cooldownMap.get(cooldownKey);
-    if (cooldownExp && cooldownExp > now) {
-      const retryAfterSeconds = Math.max(1, Math.ceil((cooldownExp - now) / 1000));
-      return {
-        allowed: false,
-        retryAfterSeconds,
-        error: `Please wait ${retryAfterSeconds}s before requesting another verification code.`,
-      };
-    }
-
-    const userWinKey = `otp:sendcount:user:${params.userId}`;
-    const userWin = this.windowMap.get(userWinKey);
-    if (userWin && userWin.expiresAt > now && userWin.count >= params.maxPerWindow) {
-      const retryAfterSeconds = Math.max(1, Math.ceil((userWin.expiresAt - now) / 1000));
-      return {
-        allowed: false,
-        retryAfterSeconds,
-        error: "Too many verification codes requested. Please try again later.",
-      };
-    }
-
-    const ipWinKey = params.ip ? `otp:sendcount:ip:${params.ip}` : null;
-    if (ipWinKey) {
-      const ipWin = this.windowMap.get(ipWinKey);
-      if (ipWin && ipWin.expiresAt > now && ipWin.count >= params.maxPerWindow) {
-        const retryAfterSeconds = Math.max(1, Math.ceil((ipWin.expiresAt - now) / 1000));
-        return {
-          allowed: false,
-          retryAfterSeconds,
-          error: "Too many verification codes requested from this network. Please try again later.",
-        };
-      }
-    }
-
-    if (params.cooldownSeconds > 0) {
-      this.cooldownMap.set(cooldownKey, now + params.cooldownSeconds * 1000);
-    }
-
-    if (!userWin || userWin.expiresAt <= now) {
-      this.windowMap.set(userWinKey, {
-        count: 1,
-        expiresAt: now + params.windowSeconds * 1000,
-      });
-    } else {
-      userWin.count += 1;
-    }
-
-    if (ipWinKey) {
-      const ipWin = this.windowMap.get(ipWinKey);
-      if (!ipWin || ipWin.expiresAt <= now) {
-        this.windowMap.set(ipWinKey, {
-          count: 1,
-          expiresAt: now + params.windowSeconds * 1000,
-        });
-      } else {
-        ipWin.count += 1;
-      }
-    }
-
-    return { allowed: true };
-  }
-
-  async revokeMfaJti(jti: string, ttlSeconds: number): Promise<boolean> {
-    const now = Date.now();
-    const existing = this.revokedJtiMap.get(jti);
-    if (existing && existing > now) return false;
-    this.revokedJtiMap.set(jti, now + Math.max(1, ttlSeconds) * 1000);
-    return true;
-  }
-
-  async isMfaJtiRevoked(jti: string): Promise<boolean> {
-    const exp = this.revokedJtiMap.get(jti);
-    if (!exp) return false;
-    if (exp <= Date.now()) {
-      this.revokedJtiMap.delete(jti);
-      return false;
-    }
-    return true;
-  }
-}
-
 class RedisOtpCacheStore implements OtpCacheStore {
   private client: RedisClientType | null = null;
   private connecting: Promise<RedisClientType> | null = null;
 
   constructor(private readonly url: string) {}
+
+  async connect(): Promise<void> {
+    await this.getClient();
+  }
 
   private async getClient(): Promise<RedisClientType> {
     if (this.client?.isOpen) return this.client;
@@ -399,14 +252,24 @@ class RedisOtpCacheStore implements OtpCacheStore {
   }
 }
 
-let defaultStore: OtpCacheStore | null = null;
+let defaultStore: RedisOtpCacheStore | null = null;
 
-function getOtpStore(): OtpCacheStore {
+function getOtpStore(): RedisOtpCacheStore {
   if (!defaultStore) {
     const redisUrl = process.env.REDIS_URL?.trim();
-    defaultStore = redisUrl ? new RedisOtpCacheStore(redisUrl) : new InMemoryOtpCacheStore();
+    if (!redisUrl) {
+      throw new Error(
+        "REDIS_URL is required. Set it in .env (e.g. redis://localhost:6379 after running 'npm run services:up').",
+      );
+    }
+    defaultStore = new RedisOtpCacheStore(redisUrl);
   }
   return defaultStore;
+}
+
+export async function connectOtpRedis(): Promise<void> {
+  await getOtpStore().connect();
+  console.info("[redis] Connected to Redis");
 }
 
 function otpCacheKey(userId: string): string {
