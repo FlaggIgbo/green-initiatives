@@ -10,6 +10,7 @@ import {
   verifySessionToken,
   signMfaToken,
   verifyMfaToken,
+  verifyMfaTokenPayload,
 } from "../auth";
 import { ESG_BASKETS } from "../services/alpaca.service";
 import {
@@ -22,7 +23,9 @@ import {
   generateOtpCode,
   hashOtpCode,
   InMemoryOtpCacheStore,
+  isMfaTokenJtiRevoked,
   issueEmailOtp,
+  revokeMfaTokenJti,
   verifyOtpCode,
   verifyStoredEmailOtp,
 } from "../services/otp.service";
@@ -162,7 +165,7 @@ describe("Email OTP & SMTP delivery", () => {
     assert.equal(verifyOtpCode("000000", salt, hash), code === "000000");
   });
 
-  it("issues, caches with TTL, sends via nodemailer, and verifies Email OTP", async () => {
+  it("issues, caches with TTL, sends via nodemailer, and verifies Email OTP atomically", async () => {
     const store = new InMemoryOtpCacheStore();
     const sentMessages: Array<{ to: unknown; subject: unknown; text: unknown }> = [];
     const baseTransport = nodemailer.createTransport({ jsonTransport: true });
@@ -175,31 +178,92 @@ describe("Email OTP & SMTP delivery", () => {
     } as unknown as Transporter;
 
     const issued = await issueEmailOtp("usr_otp_1", "investor@example.com", {
+      ip: "203.0.113.10",
       store,
       transporter: spyTransport,
       ttlSeconds: 300,
     });
 
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
     assert.equal(issued.delivery, "smtp");
     assert.equal(issued.expiresInSeconds, 300);
     assert.equal(sentMessages.length, 1);
     assert.equal(sentMessages[0].to, "investor@example.com");
     assert.match(String(sentMessages[0].text), new RegExp(issued.code));
 
-    // Wrong code is rejected
-    const badResult = await verifyStoredEmailOtp("usr_otp_1", "000000", { store });
-    if (issued.code !== "000000") {
-      assert.equal(badResult.ok, false);
-      assert.equal(badResult.status, 401);
+    // Immediate resend is blocked by cooldown (429)
+    const cooldownRes = await issueEmailOtp("usr_otp_1", "investor@example.com", {
+      ip: "203.0.113.10",
+      store,
+      transporter: spyTransport,
+    });
+    assert.equal(cooldownRes.ok, false);
+    if (!cooldownRes.ok) {
+      assert.equal(cooldownRes.status, 429);
+      assert.ok(cooldownRes.retryAfterSeconds > 0);
     }
 
-    // Correct code succeeds and clears cache entry (single-use)
-    const okResult = await verifyStoredEmailOtp("usr_otp_1", issued.code, { store });
-    assert.equal(okResult.ok, true);
+    // Wrong code increments attempts while preserving original expiry (KEEPTTL)
+    const initialExp = store.getExpiresAt("otp:usr_otp_1");
+    assert.ok(initialExp !== null);
+    const wrongCode = issued.code === "000000" ? "111111" : "000000";
+    const badResult = await verifyStoredEmailOtp("usr_otp_1", wrongCode, { store });
+    assert.equal(badResult.ok, false);
+    assert.equal(badResult.status, 401);
+    assert.equal(store.getExpiresAt("otp:usr_otp_1"), initialExp);
 
-    const replayResult = await verifyStoredEmailOtp("usr_otp_1", issued.code, { store });
-    assert.equal(replayResult.ok, false);
-    assert.equal(replayResult.status, 400);
+    // Atomic single-use consumption: concurrent valid verifications allow only ONE winner
+    const [r1, r2] = await Promise.all([
+      verifyStoredEmailOtp("usr_otp_1", issued.code, { store }),
+      verifyStoredEmailOtp("usr_otp_1", issued.code, { store }),
+    ]);
+    const successes = [r1, r2].filter((r) => r.ok);
+    const failures = [r1, r2].filter((r) => !r.ok);
+    assert.equal(successes.length, 1);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].status, 400);
+  });
+
+  it("enforces per-window send cap and mfaToken JTI revocation", async () => {
+    const store = new InMemoryOtpCacheStore();
+    const s1 = await issueEmailOtp("usr_cap", "cap@example.com", {
+      ip: "198.51.100.5",
+      store,
+      transporter: null,
+      cooldownSeconds: 0,
+      windowSeconds: 900,
+      maxPerWindow: 2,
+    });
+    const s2 = await issueEmailOtp("usr_cap", "cap@example.com", {
+      ip: "198.51.100.5",
+      store,
+      transporter: null,
+      cooldownSeconds: 0,
+      windowSeconds: 900,
+      maxPerWindow: 2,
+    });
+    const s3 = await issueEmailOtp("usr_cap", "cap@example.com", {
+      ip: "198.51.100.5",
+      store,
+      transporter: null,
+      cooldownSeconds: 0,
+      windowSeconds: 900,
+      maxPerWindow: 2,
+    });
+    assert.equal(s1.ok, true);
+    assert.equal(s2.ok, true);
+    assert.equal(s3.ok, false);
+    if (!s3.ok) assert.equal(s3.status, 429);
+
+    // mfaToken JTI revocation is single-use
+    const token = signMfaToken("usr_cap");
+    const payload = verifyMfaTokenPayload(token);
+    assert.ok(payload?.jti);
+    assert.equal(await isMfaTokenJtiRevoked(payload.jti, store), false);
+    assert.equal(await revokeMfaTokenJti(payload.jti, payload.exp, store), true);
+    assert.equal(await isMfaTokenJtiRevoked(payload.jti, store), true);
+    assert.equal(await revokeMfaTokenJti(payload.jti, payload.exp, store), false);
   });
 });
 

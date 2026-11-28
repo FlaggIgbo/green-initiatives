@@ -50,10 +50,17 @@ export function verifySessionToken(token: string): string | null {
 
 const MFA_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+export interface MfaTokenPayload {
+  userId: string;
+  jti: string;
+  exp: number;
+}
+
 export function signMfaToken(userId: string): string {
   const payload = Buffer.from(
     JSON.stringify({
       uid: userId,
+      jti: crypto.randomUUID(),
       scope: "mfa",
       iat: Date.now(),
       exp: Date.now() + MFA_TOKEN_TTL_MS,
@@ -63,7 +70,7 @@ export function signMfaToken(userId: string): string {
   return `${payload}.${sig}`;
 }
 
-export function verifyMfaToken(token: string): string | null {
+export function verifyMfaTokenPayload(token: string): MfaTokenPayload | null {
   const [payload, sig] = token.split(".");
   if (!payload || !sig) return null;
   const expected = crypto.createHmac("sha256", getSecret()).update(payload).digest("base64url");
@@ -73,15 +80,20 @@ export function verifyMfaToken(token: string): string | null {
   try {
     const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
       uid?: string;
+      jti?: string;
       scope?: string;
       exp?: number;
     };
-    if (parsed.scope !== "mfa" || !parsed.uid) return null;
+    if (parsed.scope !== "mfa" || !parsed.uid || !parsed.jti) return null;
     if (typeof parsed.exp !== "number" || parsed.exp < Date.now()) return null;
-    return parsed.uid;
+    return { userId: parsed.uid, jti: parsed.jti, exp: parsed.exp };
   } catch {
     return null;
   }
+}
+
+export function verifyMfaToken(token: string): string | null {
+  return verifyMfaTokenPayload(token)?.userId ?? null;
 }
 
 export function getSessionUserId(req: Request): string | null {

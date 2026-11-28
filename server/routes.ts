@@ -6,9 +6,10 @@ import {
   requireAuth,
   setSessionCookie,
   signMfaToken,
-  verifyMfaToken,
+  verifyMfaTokenPayload,
   verifyPassword,
   type AuthedRequest,
+  type MfaTokenPayload,
 } from "./auth";
 import { LedgerEntryModel, LinkedAccountModel, RoundUpTransactionModel, UserModel } from "./models";
 import { createPlaidLinkToken, exchangePlaidPublicToken } from "./services/plaid.service";
@@ -29,7 +30,12 @@ import {
   type AuthenticationVerificationInput,
   type RegistrationVerificationInput,
 } from "./services/webauthn.service";
-import { issueEmailOtp, verifyStoredEmailOtp } from "./services/otp.service";
+import {
+  isMfaTokenJtiRevoked,
+  issueEmailOtp,
+  revokeMfaTokenJti,
+  verifyStoredEmailOtp,
+} from "./services/otp.service";
 import type { AuthStepResponse, OtpSendResponse, PasskeySummary, PublicUser } from "@shared/types";
 
 function toPublicUser(doc: {
@@ -50,12 +56,22 @@ function toPublicUser(doc: {
   };
 }
 
-function resolveMfaOrSessionUserId(req: Request): string | null {
+async function resolveActiveMfa(req: Request): Promise<MfaTokenPayload | null> {
   const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
-  if (mfaToken) {
-    return verifyMfaToken(mfaToken);
-  }
-  return getSessionUserId(req);
+  if (!mfaToken) return null;
+  const payload = verifyMfaTokenPayload(mfaToken);
+  if (!payload) return null;
+  if (await isMfaTokenJtiRevoked(payload.jti)) return null;
+  return payload;
+}
+
+async function resolveMfaOrSession(
+  req: Request,
+): Promise<{ userId: string; mfa?: MfaTokenPayload } | null> {
+  const mfa = await resolveActiveMfa(req);
+  if (mfa) return { userId: mfa.userId, mfa };
+  const sessionUserId = getSessionUserId(req);
+  return sessionUserId ? { userId: sessionUserId } : null;
 }
 
 export function createApiRouter(): Router {
@@ -155,12 +171,12 @@ export function createApiRouter(): Router {
 
   // Auth — Step 2a: WebAuthn Passkey Registration & Authentication
   router.post("/auth/passkey/register/options", async (req, res) => {
-    const userId = resolveMfaOrSessionUserId(req);
-    if (!userId) {
+    const authCtx = await resolveMfaOrSession(req);
+    if (!authCtx) {
       res.status(401).json({ error: "Unauthorized or expired MFA session" });
       return;
     }
-    const user = await UserModel.findById(userId);
+    const user = await UserModel.findById(authCtx.userId);
     if (!user) {
       res.status(404).json({ error: "User not found" });
       return;
@@ -187,12 +203,12 @@ export function createApiRouter(): Router {
   });
 
   router.post("/auth/passkey/register/verify", async (req, res) => {
-    const userId = resolveMfaOrSessionUserId(req);
-    if (!userId) {
+    const authCtx = await resolveMfaOrSession(req);
+    if (!authCtx) {
       res.status(401).json({ error: "Unauthorized or expired MFA session" });
       return;
     }
-    const user = await UserModel.findById(userId);
+    const user = await UserModel.findById(authCtx.userId);
     if (!user) {
       res.status(404).json({ error: "User not found" });
       return;
@@ -215,6 +231,13 @@ export function createApiRouter(): Router {
         origin,
         rpId,
       );
+      if (authCtx.mfa) {
+        const revoked = await revokeMfaTokenJti(authCtx.mfa.jti, authCtx.mfa.exp);
+        if (!revoked) {
+          res.status(401).json({ error: "MFA session has already been used" });
+          return;
+        }
+      }
       const duplicate = (user.passkeys || []).some(
         (pk: { credentialId: string }) => pk.credentialId === stored.credentialId,
       );
@@ -238,13 +261,12 @@ export function createApiRouter(): Router {
   });
 
   router.post("/auth/passkey/login/options", async (req, res) => {
-    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
-    const userId = verifyMfaToken(mfaToken);
-    if (!userId) {
+    const mfa = await resolveActiveMfa(req);
+    if (!mfa) {
       res.status(401).json({ error: "Invalid or expired MFA session" });
       return;
     }
-    const user = await UserModel.findById(userId);
+    const user = await UserModel.findById(mfa.userId);
     if (!user || !user.passkeys?.length) {
       res.status(400).json({ error: "No passkeys registered for this account" });
       return;
@@ -270,13 +292,12 @@ export function createApiRouter(): Router {
   });
 
   router.post("/auth/passkey/login/verify", async (req, res) => {
-    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
-    const userId = verifyMfaToken(mfaToken);
-    if (!userId) {
+    const mfa = await resolveActiveMfa(req);
+    if (!mfa) {
       res.status(401).json({ error: "Invalid or expired MFA session" });
       return;
     }
-    const user = await UserModel.findById(userId);
+    const user = await UserModel.findById(mfa.userId);
     if (!user) {
       res.status(404).json({ error: "User not found" });
       return;
@@ -309,6 +330,11 @@ export function createApiRouter(): Router {
         origin,
         rpId,
       );
+      const revoked = await revokeMfaTokenJti(mfa.jti, mfa.exp);
+      if (!revoked) {
+        res.status(401).json({ error: "MFA session has already been used" });
+        return;
+      }
       passkey.signCount = newSignCount;
       passkey.lastUsedAt = new Date();
       user.pendingChallenge = undefined;
@@ -325,29 +351,33 @@ export function createApiRouter(): Router {
 
   // Auth — Step 2b: Email OTP Fallback via Nodemailer SMTP + Redis TTL Cache
   router.post("/auth/otp/send", async (req, res) => {
-    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
-    const userId = verifyMfaToken(mfaToken);
-    if (!userId) {
+    const mfa = await resolveActiveMfa(req);
+    if (!mfa) {
       res.status(401).json({ error: "Invalid or expired MFA session" });
       return;
     }
-    const user = await UserModel.findById(userId);
+    const user = await UserModel.findById(mfa.userId);
     if (!user) {
       res.status(404).json({ error: "User not found" });
       return;
     }
 
     try {
-      const { code, delivery, expiresInSeconds } = await issueEmailOtp(
-        String(user._id),
-        user.email,
-      );
+      const issued = await issueEmailOtp(String(user._id), user.email, { ip: req.ip });
+      if (!issued.ok) {
+        res.setHeader("Retry-After", String(issued.retryAfterSeconds));
+        res.status(issued.status).json({
+          error: issued.error,
+          retryAfterSeconds: issued.retryAfterSeconds,
+        });
+        return;
+      }
       const response: OtpSendResponse = {
         sent: true,
-        delivery,
-        expiresInSeconds,
-        ...(delivery === "console" && process.env.NODE_ENV !== "production"
-          ? { devCode: code }
+        delivery: issued.delivery,
+        expiresInSeconds: issued.expiresInSeconds,
+        ...(issued.delivery === "console" && process.env.NODE_ENV !== "production"
+          ? { devCode: issued.code }
           : {}),
       };
       res.json(response);
@@ -359,14 +389,13 @@ export function createApiRouter(): Router {
   });
 
   router.post("/auth/otp/verify", async (req, res) => {
-    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
-    const code = String(req.body?.code || "").trim();
-    const userId = verifyMfaToken(mfaToken);
-    if (!userId) {
+    const mfa = await resolveActiveMfa(req);
+    if (!mfa) {
       res.status(401).json({ error: "Invalid or expired MFA session" });
       return;
     }
-    const user = await UserModel.findById(userId);
+    const code = String(req.body?.code || "").trim();
+    const user = await UserModel.findById(mfa.userId);
     if (!user) {
       res.status(404).json({ error: "User not found" });
       return;
@@ -375,6 +404,12 @@ export function createApiRouter(): Router {
     const result = await verifyStoredEmailOtp(String(user._id), code);
     if (!result.ok) {
       res.status(result.status).json({ error: result.error });
+      return;
+    }
+
+    const revoked = await revokeMfaTokenJti(mfa.jti, mfa.exp);
+    if (!revoked) {
+      res.status(401).json({ error: "MFA session has already been used" });
       return;
     }
 

@@ -1,10 +1,13 @@
 /**
  * Auth Email OTP Service (Nodemailer SMTP + Redis short-TTL cache)
  *
- * - Stores ephemeral OTP records in Redis (`otp:<userId>`) with a 5-minute TTL (`EX`)
- *   so no OTP fields pollute the MongoDB User schema.
- * - Falls back to an in-memory TTL cache when REDIS_URL is not configured.
- * - Sends OTP emails via Nodemailer SMTP when SMTP_HOST is configured; logs to console in dev.
+ * Security controls:
+ *  - Short-TTL ephemeral storage in Redis (`otp:<userId>`, 5-min TTL) — never stored on UserSchema.
+ *  - Send cooldown (60s) + per-window send cap (max 5 sends / 15 min per user & per IP).
+ *  - Atomic single-use consumption via Redis Lua compare-and-delete (prevents replay races).
+ *  - Failed attempts preserve remaining TTL via Redis `KEEPTTL` and lock out after 5 failures.
+ *  - Single-use `mfaToken` JTI revocation stored in Redis until token expiry (`SET ... NX EX`).
+ *  - Falls back to an in-memory TTL store when REDIS_URL is unset, and console logging when SMTP_HOST is unset.
  */
 import crypto from "node:crypto";
 import nodemailer, { type Transporter } from "nodemailer";
@@ -12,6 +15,9 @@ import { createClient, type RedisClientType } from "redis";
 
 export const OTP_TTL_SECONDS = 5 * 60; // 5 minutes
 export const OTP_MAX_ATTEMPTS = 5;
+export const OTP_RESEND_COOLDOWN_SECONDS = 60; // 60 seconds between sends
+export const OTP_SEND_WINDOW_SECONDS = 15 * 60; // 15-minute rate-limit window
+export const OTP_SEND_MAX_PER_WINDOW = 5; // max 5 sends per 15 minutes
 
 export interface OtpRecord {
   codeHash: string;
@@ -19,32 +25,259 @@ export interface OtpRecord {
   attempts: number;
 }
 
+export interface SendSlotResult {
+  allowed: boolean;
+  retryAfterSeconds?: number;
+  error?: string;
+}
+
 export interface OtpCacheStore {
   set(key: string, value: OtpRecord, ttlSeconds: number): Promise<void>;
   get(key: string): Promise<OtpRecord | null>;
   del(key: string): Promise<void>;
+  /** Atomically delete key iff stored record's codeHash matches expectedCodeHash. */
+  compareAndDelete(key: string, expectedCodeHash: string): Promise<boolean>;
+  /** Atomically increment attempts while preserving remaining TTL (KEEPTTL). Deletes at maxAttempts. */
+  incrementAttemptsKeepTtl(
+    key: string,
+    maxAttempts: number,
+  ): Promise<"missing" | "locked" | "incremented">;
+  /** Atomically check resend cooldown + per-window send cap (user & optional IP) and record send. */
+  acquireSendSlot(params: {
+    userId: string;
+    ip?: string;
+    cooldownSeconds: number;
+    windowSeconds: number;
+    maxPerWindow: number;
+  }): Promise<SendSlotResult>;
+  /** Atomically mark an mfaToken JTI as revoked (returns true if newly revoked, false if already revoked). */
+  revokeMfaJti(jti: string, ttlSeconds: number): Promise<boolean>;
+  /** Check whether an mfaToken JTI has already been revoked. */
+  isMfaJtiRevoked(jti: string): Promise<boolean>;
 }
+
+const LUA_COMPARE_AND_DELETE = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local rec = cjson.decode(raw)
+if rec.codeHash == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  return 1
+end
+return 0
+`;
+
+const LUA_INCREMENT_ATTEMPTS_KEEPTTL = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return -1 end
+local rec = cjson.decode(raw)
+local nextAttempts = (rec.attempts or 0) + 1
+if nextAttempts >= tonumber(ARGV[1]) then
+  redis.call('DEL', KEYS[1])
+  return -2
+end
+rec.attempts = nextAttempts
+redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
+return nextAttempts
+`;
+
+/**
+ * KEYS[1] = cooldown key (otp:cooldown:<userId>)
+ * KEYS[2] = user window counter (otp:sendcount:user:<userId>)
+ * KEYS[3] = optional ip window counter (otp:sendcount:ip:<ip>) or ""
+ * ARGV[1] = cooldownSeconds
+ * ARGV[2] = windowSeconds
+ * ARGV[3] = maxPerWindow
+ * Returns { allowed (1|0), retryAfterSeconds, code (0=ok, 1=cooldown, 2=user_cap, 3=ip_cap) }
+ */
+const LUA_ACQUIRE_SEND_SLOT = `
+local cooldownTtl = redis.call('TTL', KEYS[1])
+if cooldownTtl > 0 then
+  return {0, cooldownTtl, 1}
+end
+
+local userCount = tonumber(redis.call('GET', KEYS[2]) or '0')
+local maxPerWindow = tonumber(ARGV[3])
+if userCount >= maxPerWindow then
+  local winTtl = redis.call('TTL', KEYS[2])
+  if winTtl < 1 then winTtl = tonumber(ARGV[2]) end
+  return {0, winTtl, 2}
+end
+
+if KEYS[3] and KEYS[3] ~= '' then
+  local ipCount = tonumber(redis.call('GET', KEYS[3]) or '0')
+  if ipCount >= maxPerWindow then
+    local ipTtl = redis.call('TTL', KEYS[3])
+    if ipTtl < 1 then ipTtl = tonumber(ARGV[2]) end
+    return {0, ipTtl, 3}
+  end
+end
+
+redis.call('SET', KEYS[1], '1', 'EX', tonumber(ARGV[1]))
+local newUserCount = redis.call('INCR', KEYS[2])
+if newUserCount == 1 then
+  redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+end
+
+if KEYS[3] and KEYS[3] ~= '' then
+  local newIpCount = redis.call('INCR', KEYS[3])
+  if newIpCount == 1 then
+    redis.call('EXPIRE', KEYS[3], tonumber(ARGV[2]))
+  end
+end
+
+return {1, 0, 0}
+`;
 
 /** In-memory TTL fallback used when REDIS_URL is not set (local dev / unit tests). */
 export class InMemoryOtpCacheStore implements OtpCacheStore {
-  private map = new Map<string, { value: OtpRecord; expiresAt: number }>();
+  private otpMap = new Map<string, { value: OtpRecord; expiresAt: number }>();
+  private cooldownMap = new Map<string, number>();
+  private windowMap = new Map<string, { count: number; expiresAt: number }>();
+  private revokedJtiMap = new Map<string, number>();
 
   async set(key: string, value: OtpRecord, ttlSeconds: number): Promise<void> {
-    this.map.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
+    this.otpMap.set(key, { value: { ...value }, expiresAt: Date.now() + ttlSeconds * 1000 });
   }
 
   async get(key: string): Promise<OtpRecord | null> {
-    const entry = this.map.get(key);
+    const entry = this.otpMap.get(key);
     if (!entry) return null;
     if (entry.expiresAt <= Date.now()) {
-      this.map.delete(key);
+      this.otpMap.delete(key);
       return null;
     }
-    return entry.value;
+    return { ...entry.value };
   }
 
   async del(key: string): Promise<void> {
-    this.map.delete(key);
+    this.otpMap.delete(key);
+  }
+
+  /** Exposed for tests verifying KEEPTTL preserves the original expiry timestamp. */
+  getExpiresAt(key: string): number | null {
+    const entry = this.otpMap.get(key);
+    if (!entry || entry.expiresAt <= Date.now()) return null;
+    return entry.expiresAt;
+  }
+
+  async compareAndDelete(key: string, expectedCodeHash: string): Promise<boolean> {
+    const entry = this.otpMap.get(key);
+    if (!entry || entry.expiresAt <= Date.now()) {
+      this.otpMap.delete(key);
+      return false;
+    }
+    if (entry.value.codeHash !== expectedCodeHash) return false;
+    this.otpMap.delete(key);
+    return true;
+  }
+
+  async incrementAttemptsKeepTtl(
+    key: string,
+    maxAttempts: number,
+  ): Promise<"missing" | "locked" | "incremented"> {
+    const entry = this.otpMap.get(key);
+    if (!entry || entry.expiresAt <= Date.now()) {
+      this.otpMap.delete(key);
+      return "missing";
+    }
+    const nextAttempts = entry.value.attempts + 1;
+    if (nextAttempts >= maxAttempts) {
+      this.otpMap.delete(key);
+      return "locked";
+    }
+    // Preserve entry.expiresAt (KEEPTTL semantics)
+    entry.value = { ...entry.value, attempts: nextAttempts };
+    return "incremented";
+  }
+
+  async acquireSendSlot(params: {
+    userId: string;
+    ip?: string;
+    cooldownSeconds: number;
+    windowSeconds: number;
+    maxPerWindow: number;
+  }): Promise<SendSlotResult> {
+    const now = Date.now();
+    const cooldownKey = `otp:cooldown:${params.userId}`;
+    const cooldownExp = this.cooldownMap.get(cooldownKey);
+    if (cooldownExp && cooldownExp > now) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((cooldownExp - now) / 1000));
+      return {
+        allowed: false,
+        retryAfterSeconds,
+        error: `Please wait ${retryAfterSeconds}s before requesting another verification code.`,
+      };
+    }
+
+    const userWinKey = `otp:sendcount:user:${params.userId}`;
+    const userWin = this.windowMap.get(userWinKey);
+    if (userWin && userWin.expiresAt > now && userWin.count >= params.maxPerWindow) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((userWin.expiresAt - now) / 1000));
+      return {
+        allowed: false,
+        retryAfterSeconds,
+        error: "Too many verification codes requested. Please try again later.",
+      };
+    }
+
+    const ipWinKey = params.ip ? `otp:sendcount:ip:${params.ip}` : null;
+    if (ipWinKey) {
+      const ipWin = this.windowMap.get(ipWinKey);
+      if (ipWin && ipWin.expiresAt > now && ipWin.count >= params.maxPerWindow) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((ipWin.expiresAt - now) / 1000));
+        return {
+          allowed: false,
+          retryAfterSeconds,
+          error: "Too many verification codes requested from this network. Please try again later.",
+        };
+      }
+    }
+
+    if (params.cooldownSeconds > 0) {
+      this.cooldownMap.set(cooldownKey, now + params.cooldownSeconds * 1000);
+    }
+
+    if (!userWin || userWin.expiresAt <= now) {
+      this.windowMap.set(userWinKey, {
+        count: 1,
+        expiresAt: now + params.windowSeconds * 1000,
+      });
+    } else {
+      userWin.count += 1;
+    }
+
+    if (ipWinKey) {
+      const ipWin = this.windowMap.get(ipWinKey);
+      if (!ipWin || ipWin.expiresAt <= now) {
+        this.windowMap.set(ipWinKey, {
+          count: 1,
+          expiresAt: now + params.windowSeconds * 1000,
+        });
+      } else {
+        ipWin.count += 1;
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  async revokeMfaJti(jti: string, ttlSeconds: number): Promise<boolean> {
+    const now = Date.now();
+    const existing = this.revokedJtiMap.get(jti);
+    if (existing && existing > now) return false;
+    this.revokedJtiMap.set(jti, now + Math.max(1, ttlSeconds) * 1000);
+    return true;
+  }
+
+  async isMfaJtiRevoked(jti: string): Promise<boolean> {
+    const exp = this.revokedJtiMap.get(jti);
+    if (!exp) return false;
+    if (exp <= Date.now()) {
+      this.revokedJtiMap.delete(jti);
+      return false;
+    }
+    return true;
   }
 }
 
@@ -85,6 +318,84 @@ class RedisOtpCacheStore implements OtpCacheStore {
   async del(key: string): Promise<void> {
     const client = await this.getClient();
     await client.del(key);
+  }
+
+  async compareAndDelete(key: string, expectedCodeHash: string): Promise<boolean> {
+    const client = await this.getClient();
+    const res = await client.eval(LUA_COMPARE_AND_DELETE, {
+      keys: [key],
+      arguments: [expectedCodeHash],
+    });
+    return Number(res) === 1;
+  }
+
+  async incrementAttemptsKeepTtl(
+    key: string,
+    maxAttempts: number,
+  ): Promise<"missing" | "locked" | "incremented"> {
+    const client = await this.getClient();
+    const res = Number(
+      await client.eval(LUA_INCREMENT_ATTEMPTS_KEEPTTL, {
+        keys: [key],
+        arguments: [String(maxAttempts)],
+      }),
+    );
+    if (res === -1) return "missing";
+    if (res === -2) return "locked";
+    return "incremented";
+  }
+
+  async acquireSendSlot(params: {
+    userId: string;
+    ip?: string;
+    cooldownSeconds: number;
+    windowSeconds: number;
+    maxPerWindow: number;
+  }): Promise<SendSlotResult> {
+    const client = await this.getClient();
+    const keys = [
+      `otp:cooldown:${params.userId}`,
+      `otp:sendcount:user:${params.userId}`,
+      params.ip ? `otp:sendcount:ip:${params.ip}` : "",
+    ];
+    const [allowed, retryAfter, code] = (await client.eval(LUA_ACQUIRE_SEND_SLOT, {
+      keys,
+      arguments: [
+        String(params.cooldownSeconds),
+        String(params.windowSeconds),
+        String(params.maxPerWindow),
+      ],
+    })) as [number, number, number];
+
+    if (Number(allowed) === 1) return { allowed: true };
+    const retryAfterSeconds = Math.max(1, Number(retryAfter));
+    if (Number(code) === 1) {
+      return {
+        allowed: false,
+        retryAfterSeconds,
+        error: `Please wait ${retryAfterSeconds}s before requesting another verification code.`,
+      };
+    }
+    return {
+      allowed: false,
+      retryAfterSeconds,
+      error: "Too many verification codes requested. Please try again later.",
+    };
+  }
+
+  async revokeMfaJti(jti: string, ttlSeconds: number): Promise<boolean> {
+    const client = await this.getClient();
+    const res = await client.set(`mfa:revoked:${jti}`, "1", {
+      NX: true,
+      EX: Math.max(1, Math.ceil(ttlSeconds)),
+    });
+    return res === "OK";
+  }
+
+  async isMfaJtiRevoked(jti: string): Promise<boolean> {
+    const client = await this.getClient();
+    const val = await client.get(`mfa:revoked:${jti}`);
+    return val !== null;
   }
 }
 
@@ -166,20 +477,53 @@ export async function sendEmailOtp(
   return { delivery: "smtp" };
 }
 
+export type IssueOtpResult =
+  | { ok: true; code: string; delivery: "smtp" | "console"; expiresInSeconds: number }
+  | { ok: false; status: 429; error: string; retryAfterSeconds: number };
+
 export async function issueEmailOtp(
   userId: string,
   email: string,
-  options?: { store?: OtpCacheStore; transporter?: Transporter | null; ttlSeconds?: number },
-): Promise<{ code: string; delivery: "smtp" | "console"; expiresInSeconds: number }> {
+  options?: {
+    ip?: string;
+    store?: OtpCacheStore;
+    transporter?: Transporter | null;
+    ttlSeconds?: number;
+    cooldownSeconds?: number;
+    windowSeconds?: number;
+    maxPerWindow?: number;
+  },
+): Promise<IssueOtpResult> {
   const store = options?.store ?? getOtpStore();
+  const slot = await store.acquireSendSlot({
+    userId,
+    ip: options?.ip,
+    cooldownSeconds: options?.cooldownSeconds ?? OTP_RESEND_COOLDOWN_SECONDS,
+    windowSeconds: options?.windowSeconds ?? OTP_SEND_WINDOW_SECONDS,
+    maxPerWindow: options?.maxPerWindow ?? OTP_SEND_MAX_PER_WINDOW,
+  });
+
+  if (!slot.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      error: slot.error || "Too many verification code requests. Please wait.",
+      retryAfterSeconds: slot.retryAfterSeconds ?? OTP_RESEND_COOLDOWN_SECONDS,
+    };
+  }
+
   const ttlSeconds = options?.ttlSeconds ?? OTP_TTL_SECONDS;
   const code = generateOtpCode();
   const salt = crypto.randomBytes(16).toString("hex");
 
-  await store.set(otpCacheKey(userId), { codeHash: hashOtpCode(code, salt), salt, attempts: 0 }, ttlSeconds);
+  await store.set(
+    otpCacheKey(userId),
+    { codeHash: hashOtpCode(code, salt), salt, attempts: 0 },
+    ttlSeconds,
+  );
   const { delivery } = await sendEmailOtp(email, code, options?.transporter);
 
-  return { code, delivery, expiresInSeconds: ttlSeconds };
+  return { ok: true, code, delivery, expiresInSeconds: ttlSeconds };
 }
 
 export type VerifyOtpResult =
@@ -189,7 +533,7 @@ export type VerifyOtpResult =
 export async function verifyStoredEmailOtp(
   userId: string,
   code: string,
-  options?: { store?: OtpCacheStore; ttlSeconds?: number },
+  options?: { store?: OtpCacheStore },
 ): Promise<VerifyOtpResult> {
   const store = options?.store ?? getOtpStore();
   const key = otpCacheKey(userId);
@@ -213,23 +557,48 @@ export async function verifyStoredEmailOtp(
   }
 
   if (!verifyOtpCode(code, record.salt, record.codeHash)) {
-    const nextAttempts = record.attempts + 1;
-    if (nextAttempts >= OTP_MAX_ATTEMPTS) {
-      await store.del(key);
+    const outcome = await store.incrementAttemptsKeepTtl(key, OTP_MAX_ATTEMPTS);
+    if (outcome === "missing") {
+      return {
+        ok: false,
+        status: 400,
+        error: "No active or unexpired verification code. Request a new code.",
+      };
+    }
+    if (outcome === "locked") {
       return {
         ok: false,
         status: 429,
         error: "Too many failed attempts. Request a new code.",
       };
     }
-    await store.set(
-      key,
-      { ...record, attempts: nextAttempts },
-      options?.ttlSeconds ?? OTP_TTL_SECONDS,
-    );
     return { ok: false, status: 401, error: "Invalid verification code" };
   }
 
-  await store.del(key);
+  // Atomic single-use consumption (prevents concurrent replay races)
+  const consumed = await store.compareAndDelete(key, record.codeHash);
+  if (!consumed) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Verification code has already been used or expired.",
+    };
+  }
+
   return { ok: true };
+}
+
+export async function revokeMfaTokenJti(
+  jti: string,
+  expMs: number,
+  store?: OtpCacheStore,
+): Promise<boolean> {
+  const targetStore = store ?? getOtpStore();
+  const remainingSeconds = Math.max(1, Math.ceil((expMs - Date.now()) / 1000));
+  return targetStore.revokeMfaJti(jti, remainingSeconds);
+}
+
+export async function isMfaTokenJtiRevoked(jti: string, store?: OtpCacheStore): Promise<boolean> {
+  const targetStore = store ?? getOtpStore();
+  return targetStore.isMfaJtiRevoked(jti);
 }
