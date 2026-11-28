@@ -1,15 +1,48 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "./api";
+import {
+  authenticateWithPasskey,
+  createPasskey,
+  getStoredPasswordCredential,
+  isPasskeySupported,
+  isPasswordCredentialSupported,
+  preventSilentCredentialAccess,
+  storePasswordCredential,
+} from "./credentials";
 import type {
+  AuthStepResponse,
   EsgBasket,
   LinkedAccount,
+  PasskeySummary,
   PortfolioPosition,
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
   PublicUser,
   RoundUpSummary,
 } from "@shared/types";
 
 const formatUsd = (amount: number) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount);
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function validateEmail(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return "Email address is required.";
+  if (!EMAIL_REGEX.test(trimmed)) {
+    return "Please enter a valid email address (e.g. you@example.com).";
+  }
+  return null;
+}
+
+interface PendingMfaState {
+  mfaToken: string;
+  email: string;
+  password: string;
+  hasPasskey: boolean;
+  passkeyOptions?: PublicKeyCredentialRequestOptionsJSON;
+  passkeyRegistrationOptions?: PublicKeyCredentialCreationOptionsJSON;
+}
 
 export function App() {
   const [user, setUser] = useState<PublicUser | null>(null);
@@ -19,7 +52,16 @@ export function App() {
   // Auth form state
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
+  const [emailError, setEmailError] = useState<string | null>(null);
   const [password, setPassword] = useState("");
+  const [mfaStep, setMfaStep] = useState<"none" | "passkey" | "otp">("none");
+  const [pendingMfa, setPendingMfa] = useState<PendingMfaState | null>(null);
+  const [otpCode, setOtpCode] = useState("");
+  const [otpInfo, setOtpInfo] = useState<{ delivery: "smtp" | "console"; devCode?: string } | null>(
+    null,
+  );
+  const [mfaNotice, setMfaNotice] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,22 +70,134 @@ export function App() {
   const [accounts, setAccounts] = useState<LinkedAccount[]>([]);
   const [summary, setSummary] = useState<RoundUpSummary | null>(null);
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
+  const [passkeys, setPasskeys] = useState<PasskeySummary[]>([]);
   const [busy, setBusy] = useState(false);
 
   // Simulated Plaid Link modal (TODO: swap for Plaid Link SDK when live)
   const [plaidOpen, setPlaidOpen] = useState(false);
 
   const loadAppData = async () => {
-    const [b, a, s, p] = await Promise.all([
+    const [b, a, s, p, pk] = await Promise.all([
       api.getBaskets(),
       api.getAccounts(),
       api.getSummary(),
       api.getPositions(),
+      api.getPasskeys().catch(() => [] as PasskeySummary[]),
     ]);
     setBaskets(b);
     setAccounts(a);
     setSummary(s);
     setPositions(p);
+    setPasskeys(pk);
+  };
+
+  const completeSignIn = async (
+    authedUser: PublicUser,
+    credEmail?: string,
+    credPassword?: string,
+  ) => {
+    if (credEmail && credPassword) {
+      await storePasswordCredential(credEmail, credPassword);
+    }
+    setPendingMfa(null);
+    setMfaStep("none");
+    setOtpCode("");
+    setOtpInfo(null);
+    setMfaNotice(null);
+    setUser(authedUser);
+    await loadAppData();
+  };
+
+  const triggerEmailOtpFallback = async (mfa: PendingMfaState, reason?: string) => {
+    setMfaStep("otp");
+    setError(null);
+    setMfaNotice(
+      reason
+        ? `${reason} Falling back to Email OTP verification.`
+        : "Verify with a 6-digit code sent to your email.",
+    );
+    setAuthBusy(true);
+    try {
+      const otpRes = await api.sendEmailOtp(mfa.mfaToken);
+      setOtpInfo({ delivery: otpRes.delivery, devCode: otpRes.devCode });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send Email OTP");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const runPasskeyChallenge = async (mfa: PendingMfaState) => {
+    setMfaStep("passkey");
+    setError(null);
+    setMfaNotice(null);
+
+    if (!isPasskeySupported()) {
+      await triggerEmailOtpFallback(mfa, "Passkeys are not supported on this browser.");
+      return;
+    }
+
+    setAuthBusy(true);
+    try {
+      if (mfa.hasPasskey && mfa.passkeyOptions) {
+        const assertion = await authenticateWithPasskey(mfa.passkeyOptions);
+        const verified = await api.verifyPasskeyLogin(assertion, mfa.mfaToken);
+        await completeSignIn(verified.user, mfa.email, mfa.password);
+        return;
+      }
+
+      if (!mfa.hasPasskey && mfa.passkeyRegistrationOptions) {
+        const registration = await createPasskey(mfa.passkeyRegistrationOptions);
+        const verified = await api.verifyPasskeyRegistration(registration, mfa.mfaToken);
+        await completeSignIn(verified.user, mfa.email, mfa.password);
+        return;
+      }
+
+      await triggerEmailOtpFallback(mfa, "Passkey challenge options unavailable.");
+    } catch (err) {
+      const reason =
+        err instanceof Error ? err.message : "Passkey verification could not be completed.";
+      await triggerEmailOtpFallback(mfa, `Passkey unavailable (${reason}).`);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const submitCredentials = async (
+    targetEmail: string,
+    targetPassword: string,
+    mode: "login" | "register",
+  ) => {
+    setError(null);
+    setMessage(null);
+    setAuthBusy(true);
+    try {
+      const res: AuthStepResponse =
+        mode === "login"
+          ? await api.login(targetEmail, targetPassword)
+          : await api.register(targetEmail, targetPassword);
+
+      if (res.status === "authenticated" || ("user" in res && res.user)) {
+        const authedUser = (res as { user: PublicUser }).user;
+        await completeSignIn(authedUser, targetEmail, targetPassword);
+        return;
+      }
+
+      const mfa: PendingMfaState = {
+        mfaToken: res.mfaToken,
+        email: res.email,
+        password: targetPassword,
+        hasPasskey: res.hasPasskey,
+        passkeyOptions: res.passkeyOptions,
+        passkeyRegistrationOptions: res.passkeyRegistrationOptions,
+      };
+      setPendingMfa(mfa);
+      await runPasskeyChallenge(mfa);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Authentication failed");
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -53,32 +207,109 @@ export function App() {
         setUser(u);
         await loadAppData();
       })
-      .catch(() => setUser(null))
+      .catch(async () => {
+        setUser(null);
+        // Attempt silent sign-in via navigator.credentials.get({ password: true })
+        const stored = await getStoredPasswordCredential("silent");
+        if (stored) {
+          setEmail(stored.email);
+          setPassword(stored.password);
+          await submitCredentials(stored.email, stored.password, "login");
+        }
+      })
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleAuthSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    const validationError = validateEmail(email);
+    setEmailError(validationError);
+    if (validationError) return;
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+    await submitCredentials(email.trim(), password, authMode);
+  };
+
+  const handleSavedCredentialLogin = async () => {
+    setError(null);
+    const stored = await getStoredPasswordCredential("optional");
+    if (!stored) {
+      setError("No saved password credentials found in your browser.");
+      return;
+    }
+    setEmail(stored.email);
+    setPassword(stored.password);
+    await submitCredentials(stored.email, stored.password, "login");
+  };
+
+  const handleOtpSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pendingMfa) return;
+    setError(null);
+    setAuthBusy(true);
+    try {
+      const verified = await api.verifyEmailOtp(pendingMfa.mfaToken, otpCode);
+      await completeSignIn(verified.user, pendingMfa.email, pendingMfa.password);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "OTP verification failed");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleRetryPasskey = async () => {
+    if (!pendingMfa) return;
+    setError(null);
+    setAuthBusy(true);
+    try {
+      if (pendingMfa.hasPasskey) {
+        const { options } = await api.getPasskeyLoginOptions(pendingMfa.mfaToken);
+        const updated: PendingMfaState = { ...pendingMfa, passkeyOptions: options };
+        setPendingMfa(updated);
+        await runPasskeyChallenge(updated);
+      } else {
+        const { options } = await api.getPasskeyRegisterOptions(pendingMfa.mfaToken);
+        const updated: PendingMfaState = { ...pendingMfa, passkeyRegistrationOptions: options };
+        setPendingMfa(updated);
+        await runPasskeyChallenge(updated);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not restart passkey verification");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleRegisterNewPasskey = async () => {
+    setBusy(true);
     setError(null);
     setMessage(null);
     try {
-      const res =
-        authMode === "login"
-          ? await api.login(email, password)
-          : await api.register(email, password);
-      setUser(res.user);
+      const { options } = await api.getPasskeyRegisterOptions();
+      const registration = await createPasskey(options, `Passkey (${new Date().toLocaleDateString()})`);
+      await api.verifyPasskeyRegistration(registration);
       await loadAppData();
+      setMessage("New passkey registered for your account.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Authentication failed");
+      setError(err instanceof Error ? err.message : "Failed to register passkey");
+    } finally {
+      setBusy(false);
     }
   };
 
   const handleLogout = async () => {
     await api.logout();
+    await preventSilentCredentialAccess();
     setUser(null);
     setSummary(null);
     setAccounts([]);
     setPositions([]);
+    setPasskeys([]);
+    setPendingMfa(null);
+    setMfaStep("none");
   };
 
   const handleLinkPlaidBank = async (
@@ -176,57 +407,217 @@ export function App() {
             </p>
           </div>
 
+          {mfaNotice && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {mfaNotice}
+            </div>
+          )}
+
           {error && (
             <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
           )}
 
-          <form onSubmit={handleAuthSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="email" className="block text-xs font-medium text-zinc-700">
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label htmlFor="password" className="block text-xs font-medium text-zinc-700">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                required
-                minLength={6}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Min 6 characters"
-                className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
-            <button
-              type="submit"
-              className="w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
-            >
-              {authMode === "login" ? "Sign In" : "Create Account"}
-            </button>
-          </form>
+          {mfaStep === "none" && (
+            <>
+              <form onSubmit={handleAuthSubmit} noValidate className="space-y-4">
+                <div>
+                  <label htmlFor="email" className="block text-xs font-medium text-zinc-700">
+                    Email
+                  </label>
+                  <input
+                    id="email"
+                    name="username"
+                    type="email"
+                    autoComplete="username"
+                    required
+                    aria-invalid={Boolean(emailError)}
+                    aria-describedby={emailError ? "email-error" : undefined}
+                    value={email}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setEmail(next);
+                      if (emailError) setEmailError(validateEmail(next));
+                    }}
+                    onBlur={() => {
+                      if (email.length > 0) setEmailError(validateEmail(email));
+                    }}
+                    placeholder="you@example.com"
+                    className={`mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none ${
+                      emailError
+                        ? "border-red-400 focus:border-red-500"
+                        : "border-zinc-300 focus:border-emerald-500"
+                    }`}
+                  />
+                  {emailError && (
+                    <p id="email-error" role="alert" className="mt-1 text-xs text-red-600">
+                      {emailError}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <label htmlFor="password" className="block text-xs font-medium text-zinc-700">
+                    Password
+                  </label>
+                  <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                    required
+                    minLength={6}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Min 6 characters"
+                    className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={authBusy}
+                  className="w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {authBusy
+                    ? "Verifying..."
+                    : authMode === "login"
+                      ? "Sign In"
+                      : "Create Account"}
+                </button>
+              </form>
 
-          <button
-            type="button"
-            onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}
-            className="mt-4 w-full text-center text-xs text-zinc-500 hover:text-zinc-800"
-          >
-            {authMode === "login"
-              ? "Need an account? Create one"
-              : "Already have an account? Sign in"}
-          </button>
+              {authMode === "login" && isPasswordCredentialSupported() && (
+                <button
+                  type="button"
+                  disabled={authBusy}
+                  onClick={handleSavedCredentialLogin}
+                  className="mt-2.5 w-full rounded-lg border border-zinc-300 px-4 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                >
+                  Sign In with Saved Password
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setAuthMode(authMode === "login" ? "register" : "login");
+                }}
+                className="mt-4 w-full text-center text-xs text-zinc-500 hover:text-zinc-800"
+              >
+                {authMode === "login"
+                  ? "Need an account? Create one"
+                  : "Already have an account? Sign in"}
+              </button>
+            </>
+          )}
+
+          {mfaStep === "passkey" && pendingMfa && (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-4 text-sm">
+                <p className="font-semibold text-emerald-900">
+                  {pendingMfa.hasPasskey ? "Passkey Verification" : "Set Up Your Passkey"}
+                </p>
+                <p className="mt-1 text-xs text-emerald-800">
+                  {pendingMfa.hasPasskey
+                    ? "Confirm your identity using Touch ID, Face ID, or your device passkey."
+                    : "Protect your finance account by registering a passkey on this device."}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={authBusy}
+                onClick={handleRetryPasskey}
+                className="w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {authBusy
+                  ? "Waiting for Passkey..."
+                  : pendingMfa.hasPasskey
+                    ? "Verify with Passkey"
+                    : "Register Passkey"}
+              </button>
+              <button
+                type="button"
+                disabled={authBusy}
+                onClick={() => triggerEmailOtpFallback(pendingMfa)}
+                className="w-full rounded-lg border border-zinc-300 px-4 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              >
+                Use Email OTP Instead
+              </button>
+            </div>
+          )}
+
+          {mfaStep === "otp" && pendingMfa && (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600">
+                Enter the 6-digit verification code sent to{" "}
+                <span className="font-semibold text-zinc-900">{pendingMfa.email}</span>.
+                {otpInfo?.devCode && (
+                  <p className="mt-1.5 rounded bg-emerald-50 px-2 py-1 font-mono text-emerald-800">
+                    Dev SMTP preview code: <strong>{otpInfo.devCode}</strong>
+                  </p>
+                )}
+              </div>
+              <form onSubmit={handleOtpSubmit} className="space-y-3">
+                <div>
+                  <label htmlFor="otp-code" className="block text-xs font-medium text-zinc-700">
+                    6-Digit Email Code
+                  </label>
+                  <input
+                    id="otp-code"
+                    name="one-time-code"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    pattern="[0-9]{6}"
+                    maxLength={6}
+                    required
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="123456"
+                    className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-center font-mono text-lg tracking-widest focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={authBusy || otpCode.length !== 6}
+                  className="w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {authBusy ? "Verifying Code..." : "Verify Email Code"}
+                </button>
+              </form>
+              <div className="flex items-center justify-between text-xs">
+                <button
+                  type="button"
+                  disabled={authBusy}
+                  onClick={() => triggerEmailOtpFallback(pendingMfa)}
+                  className="text-emerald-700 hover:underline disabled:opacity-50"
+                >
+                  Resend code
+                </button>
+                <button
+                  type="button"
+                  disabled={authBusy}
+                  onClick={handleRetryPasskey}
+                  className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50"
+                >
+                  Try Passkey Again
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setMfaStep("none");
+                  setPendingMfa(null);
+                  setOtpCode("");
+                  setOtpInfo(null);
+                  setMfaNotice(null);
+                  setError(null);
+                }}
+                className="w-full text-center text-xs text-zinc-500 hover:text-zinc-800"
+              >
+                Back to Sign In
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -509,6 +900,62 @@ export function App() {
                     </button>
                   );
                 })}
+              </div>
+            </section>
+
+            {/* Security & Passkeys */}
+            <section className="rounded-xl border border-zinc-200 bg-white p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold">Security &amp; Passkeys (WebAuthn)</h2>
+                  <p className="text-xs text-zinc-500">
+                    Passkeys protect sign-ins after password entry, with Email OTP via SMTP as
+                    fallback.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={busy || !isPasskeySupported()}
+                  onClick={handleRegisterNewPasskey}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  Add Passkey
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-2">
+                {passkeys.length === 0 ? (
+                  <p className="text-sm text-zinc-500">
+                    No passkeys registered yet. Add one for phishing-resistant two-step sign-in.
+                  </p>
+                ) : (
+                  passkeys.map((pk) => (
+                    <div
+                      key={pk.credentialId}
+                      className="flex items-center justify-between rounded-lg border border-zinc-200 p-3 text-sm"
+                    >
+                      <div>
+                        <p className="font-medium">{pk.label}</p>
+                        <p className="text-xs text-zinc-500">
+                          Added {new Date(pk.createdAt).toLocaleDateString()}
+                          {pk.lastUsedAt
+                            ? ` • Last used ${new Date(pk.lastUsedAt).toLocaleDateString()}`
+                            : ""}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await api.deletePasskey(pk.credentialId);
+                          await loadAppData();
+                        }}
+                        className="text-xs text-red-600 hover:underline"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))
+                )}
               </div>
             </section>
           </>

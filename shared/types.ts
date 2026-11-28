@@ -17,6 +17,63 @@ export interface PublicUser {
   roundUpEnabled: boolean;
   selectedBasketId: string;
   roundUpBalanceCents: number;
+  passkeysCount?: number;
+}
+
+export interface PasskeySummary {
+  credentialId: string;
+  label: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+export interface PublicKeyCredentialDescriptorJSON {
+  id: string;
+  type: "public-key";
+  transports?: string[];
+}
+
+export interface PublicKeyCredentialCreationOptionsJSON {
+  challenge: string;
+  rp: { id: string; name: string };
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: Array<{ type: "public-key"; alg: number }>;
+  timeout: number;
+  excludeCredentials: PublicKeyCredentialDescriptorJSON[];
+  authenticatorSelection: {
+    residentKey: "preferred" | "required" | "discouraged";
+    userVerification: "preferred" | "required" | "discouraged";
+  };
+  attestation: "none";
+}
+
+export interface PublicKeyCredentialRequestOptionsJSON {
+  challenge: string;
+  rpId: string;
+  timeout: number;
+  userVerification: "preferred" | "required" | "discouraged";
+  allowCredentials: PublicKeyCredentialDescriptorJSON[];
+}
+
+export type AuthStepResponse =
+  | {
+      status: "authenticated";
+      user: PublicUser;
+    }
+  | {
+      status: "mfa_required";
+      mfaToken: string;
+      email: string;
+      hasPasskey: boolean;
+      passkeyOptions?: PublicKeyCredentialRequestOptionsJSON;
+      passkeyRegistrationOptions?: PublicKeyCredentialCreationOptionsJSON;
+    };
+
+export interface OtpSendResponse {
+  sent: boolean;
+  delivery: "smtp" | "console";
+  expiresInSeconds: number;
+  devCode?: string;
 }
 
 export interface LinkedAccount {

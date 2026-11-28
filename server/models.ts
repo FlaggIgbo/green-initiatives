@@ -1,5 +1,19 @@
 import mongoose, { Schema } from "mongoose";
 
+const PasskeySubSchema = new Schema(
+  {
+    credentialId: { type: String, required: true },
+    publicKeySpki: { type: String, required: true },
+    algorithm: { type: Number, default: -7 },
+    signCount: { type: Number, default: 0 },
+    transports: { type: [String], default: [] },
+    label: { type: String, default: "Passkey" },
+    createdAt: { type: Date, default: Date.now },
+    lastUsedAt: { type: Date },
+  },
+  { _id: false },
+);
+
 const UserSchema = new Schema(
   {
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -7,6 +21,12 @@ const UserSchema = new Schema(
     roundUpEnabled: { type: Boolean, default: true },
     selectedBasketId: { type: String, default: "clean-energy-grid" },
     roundUpBalanceCents: { type: Number, default: 0 },
+    passkeys: { type: [PasskeySubSchema], default: [] },
+    pendingChallenge: {
+      challenge: { type: String },
+      type: { type: String, enum: ["registration", "authentication"] },
+      expiresAt: { type: Date },
+    },
     // TODO: Add givingRule subdocument (enabled, percentageBps, eligibleCategories, directCharitySplitPct, dafSplitPct, selectedCharityEin)
     // TODO: Add givingBalanceCents, dafAccountId, dafSponsorEin, and achAuthorizedAt (NACHA consent audit)
   },

@@ -72,6 +72,21 @@ async function setupMocks(page: Page, authenticated: boolean) {
         : route.fulfill({ status: 401, contentType: "application/json", body: "{}" });
     }
 
+    if (pathname === "/api/auth/passkeys") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            credentialId: "cred_mock_1",
+            label: "MacBook Touch ID",
+            createdAt: "2026-11-10T12:00:00.000Z",
+            lastUsedAt: "2026-11-27T14:00:00.000Z",
+          },
+        ]),
+      });
+    }
+
     if (pathname === "/api/baskets") {
       return route.fulfill({
         status: 200,

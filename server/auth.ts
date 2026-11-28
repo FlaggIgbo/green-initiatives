@@ -22,9 +22,9 @@ export function verifyPassword(password: string, stored: string): boolean {
 }
 
 export function signSessionToken(userId: string): string {
-  const payload = Buffer.from(JSON.stringify({ uid: userId, iat: Date.now() })).toString(
-    "base64url",
-  );
+  const payload = Buffer.from(
+    JSON.stringify({ uid: userId, scope: "session", iat: Date.now() }),
+  ).toString("base64url");
   const sig = crypto.createHmac("sha256", getSecret()).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
@@ -39,11 +39,54 @@ export function verifySessionToken(token: string): string | null {
   try {
     const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
       uid?: string;
+      scope?: string;
     };
+    if (parsed.scope && parsed.scope !== "session") return null;
     return parsed.uid ?? null;
   } catch {
     return null;
   }
+}
+
+const MFA_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+export function signMfaToken(userId: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      uid: userId,
+      scope: "mfa",
+      iat: Date.now(),
+      exp: Date.now() + MFA_TOKEN_TTL_MS,
+    }),
+  ).toString("base64url");
+  const sig = crypto.createHmac("sha256", getSecret()).update(payload).digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+export function verifyMfaToken(token: string): string | null {
+  const [payload, sig] = token.split(".");
+  if (!payload || !sig) return null;
+  const expected = crypto.createHmac("sha256", getSecret()).update(payload).digest("base64url");
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+      uid?: string;
+      scope?: string;
+      exp?: number;
+    };
+    if (parsed.scope !== "mfa" || !parsed.uid) return null;
+    if (typeof parsed.exp !== "number" || parsed.exp < Date.now()) return null;
+    return parsed.uid;
+  } catch {
+    return null;
+  }
+}
+
+export function getSessionUserId(req: Request): string | null {
+  const token = parseCookie(req.headers.cookie, COOKIE_NAME);
+  return token ? verifySessionToken(token) : null;
 }
 
 export function parseCookie(header: string | undefined, name: string): string | null {

@@ -1,9 +1,12 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import {
   clearSessionCookie,
+  getSessionUserId,
   hashPassword,
   requireAuth,
   setSessionCookie,
+  signMfaToken,
+  verifyMfaToken,
   verifyPassword,
   type AuthedRequest,
 } from "./auth";
@@ -15,7 +18,19 @@ import {
   ROUNDUP_THRESHOLD_CENTS,
   syncUserRoundUps,
 } from "./services/roundup.service";
-import type { PublicUser } from "@shared/types";
+import {
+  buildAuthenticationOptions,
+  buildRegistrationOptions,
+  CHALLENGE_TTL_MS,
+  generateChallenge,
+  resolveRpConfig,
+  verifyPasskeyAuthentication,
+  verifyPasskeyRegistration,
+  type AuthenticationVerificationInput,
+  type RegistrationVerificationInput,
+} from "./services/webauthn.service";
+import { issueEmailOtp, verifyStoredEmailOtp } from "./services/otp.service";
+import type { AuthStepResponse, OtpSendResponse, PasskeySummary, PublicUser } from "@shared/types";
 
 function toPublicUser(doc: {
   _id: unknown;
@@ -23,6 +38,7 @@ function toPublicUser(doc: {
   roundUpEnabled: boolean;
   selectedBasketId: string;
   roundUpBalanceCents: number;
+  passkeys?: Array<unknown>;
 }): PublicUser {
   return {
     id: String(doc._id),
@@ -30,13 +46,22 @@ function toPublicUser(doc: {
     roundUpEnabled: doc.roundUpEnabled,
     selectedBasketId: doc.selectedBasketId,
     roundUpBalanceCents: doc.roundUpBalanceCents,
+    passkeysCount: doc.passkeys?.length ?? 0,
   };
+}
+
+function resolveMfaOrSessionUserId(req: Request): string | null {
+  const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
+  if (mfaToken) {
+    return verifyMfaToken(mfaToken);
+  }
+  return getSessionUserId(req);
 }
 
 export function createApiRouter(): Router {
   const router = Router();
 
-  // Auth
+  // Auth — Step 1: Username / Password -> triggers Step 2 (Passkey or Email OTP fallback)
   router.post("/auth/register", async (req, res) => {
     const email = String(req.body?.email || "")
       .trim()
@@ -51,9 +76,30 @@ export function createApiRouter(): Router {
       res.status(409).json({ error: "Account already exists" });
       return;
     }
-    const user = await UserModel.create({ email, passwordHash: hashPassword(password) });
-    setSessionCookie(res, String(user._id));
-    res.status(201).json({ user: toPublicUser(user) });
+    const challenge = generateChallenge();
+    const { rpId } = resolveRpConfig(req.headers);
+    const user = await UserModel.create({
+      email,
+      passwordHash: hashPassword(password),
+      pendingChallenge: {
+        challenge,
+        type: "registration",
+        expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+      },
+    });
+    const response: AuthStepResponse = {
+      status: "mfa_required",
+      mfaToken: signMfaToken(String(user._id)),
+      email: user.email,
+      hasPasskey: false,
+      passkeyRegistrationOptions: buildRegistrationOptions({
+        userId: String(user._id),
+        email: user.email,
+        rpId,
+        challenge,
+      }),
+    };
+    res.status(201).json(response);
   });
 
   router.post("/auth/login", async (req, res) => {
@@ -66,8 +112,313 @@ export function createApiRouter(): Router {
       res.status(401).json({ error: "Invalid email or password" });
       return;
     }
+
+    const challenge = generateChallenge();
+    const { rpId } = resolveRpConfig(req.headers);
+    const hasPasskey = Array.isArray(user.passkeys) && user.passkeys.length > 0;
+    user.pendingChallenge = {
+      challenge,
+      type: hasPasskey ? "authentication" : "registration",
+      expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+    };
+    await user.save();
+
+    const response: AuthStepResponse = {
+      status: "mfa_required",
+      mfaToken: signMfaToken(String(user._id)),
+      email: user.email,
+      hasPasskey,
+      ...(hasPasskey
+        ? {
+            passkeyOptions: buildAuthenticationOptions({
+              rpId,
+              challenge,
+              passkeys: user.passkeys.map(
+                (pk: { credentialId: string; transports?: string[] }) => ({
+                  credentialId: pk.credentialId,
+                  transports: pk.transports,
+                }),
+              ),
+            }),
+          }
+        : {
+            passkeyRegistrationOptions: buildRegistrationOptions({
+              userId: String(user._id),
+              email: user.email,
+              rpId,
+              challenge,
+            }),
+          }),
+    };
+    res.json(response);
+  });
+
+  // Auth — Step 2a: WebAuthn Passkey Registration & Authentication
+  router.post("/auth/passkey/register/options", async (req, res) => {
+    const userId = resolveMfaOrSessionUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized or expired MFA session" });
+      return;
+    }
+    const user = await UserModel.findById(userId);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    const challenge = generateChallenge();
+    const { rpId } = resolveRpConfig(req.headers);
+    user.pendingChallenge = {
+      challenge,
+      type: "registration",
+      expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+    };
+    await user.save();
+    res.json({
+      options: buildRegistrationOptions({
+        userId: String(user._id),
+        email: user.email,
+        rpId,
+        challenge,
+        existingCredentialIds: (user.passkeys || []).map(
+          (pk: { credentialId: string }) => pk.credentialId,
+        ),
+      }),
+    });
+  });
+
+  router.post("/auth/passkey/register/verify", async (req, res) => {
+    const userId = resolveMfaOrSessionUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized or expired MFA session" });
+      return;
+    }
+    const user = await UserModel.findById(userId);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    const pending = user.pendingChallenge;
+    if (
+      !pending?.challenge ||
+      pending.type !== "registration" ||
+      !pending.expiresAt ||
+      pending.expiresAt.getTime() < Date.now()
+    ) {
+      res.status(400).json({ error: "Passkey registration challenge expired; please retry" });
+      return;
+    }
+    const { rpId, origin } = resolveRpConfig(req.headers);
+    try {
+      const stored = verifyPasskeyRegistration(
+        req.body?.credential as RegistrationVerificationInput,
+        pending.challenge,
+        origin,
+        rpId,
+      );
+      const duplicate = (user.passkeys || []).some(
+        (pk: { credentialId: string }) => pk.credentialId === stored.credentialId,
+      );
+      if (!duplicate) {
+        user.passkeys.push({
+          ...stored,
+          createdAt: new Date(),
+          lastUsedAt: new Date(),
+        });
+      }
+      user.pendingChallenge = undefined;
+      await user.save();
+      setSessionCookie(res, String(user._id));
+      const response: AuthStepResponse = { status: "authenticated", user: toPublicUser(user) };
+      res.json(response);
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "Passkey registration verification failed",
+      });
+    }
+  });
+
+  router.post("/auth/passkey/login/options", async (req, res) => {
+    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
+    const userId = verifyMfaToken(mfaToken);
+    if (!userId) {
+      res.status(401).json({ error: "Invalid or expired MFA session" });
+      return;
+    }
+    const user = await UserModel.findById(userId);
+    if (!user || !user.passkeys?.length) {
+      res.status(400).json({ error: "No passkeys registered for this account" });
+      return;
+    }
+    const challenge = generateChallenge();
+    const { rpId } = resolveRpConfig(req.headers);
+    user.pendingChallenge = {
+      challenge,
+      type: "authentication",
+      expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+    };
+    await user.save();
+    res.json({
+      options: buildAuthenticationOptions({
+        rpId,
+        challenge,
+        passkeys: user.passkeys.map((pk: { credentialId: string; transports?: string[] }) => ({
+          credentialId: pk.credentialId,
+          transports: pk.transports,
+        })),
+      }),
+    });
+  });
+
+  router.post("/auth/passkey/login/verify", async (req, res) => {
+    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
+    const userId = verifyMfaToken(mfaToken);
+    if (!userId) {
+      res.status(401).json({ error: "Invalid or expired MFA session" });
+      return;
+    }
+    const user = await UserModel.findById(userId);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    const pending = user.pendingChallenge;
+    if (
+      !pending?.challenge ||
+      pending.type !== "authentication" ||
+      !pending.expiresAt ||
+      pending.expiresAt.getTime() < Date.now()
+    ) {
+      res.status(400).json({ error: "Passkey authentication challenge expired; please retry" });
+      return;
+    }
+    const assertion = req.body?.credential as AuthenticationVerificationInput | undefined;
+    const credId = assertion?.id || assertion?.rawId;
+    const passkey = (user.passkeys || []).find(
+      (pk: { credentialId: string }) => pk.credentialId === credId,
+    );
+    if (!assertion || !passkey) {
+      res.status(401).json({ error: "Unrecognized passkey credential" });
+      return;
+    }
+    const { rpId, origin } = resolveRpConfig(req.headers);
+    try {
+      const { newSignCount } = verifyPasskeyAuthentication(
+        assertion,
+        passkey,
+        pending.challenge,
+        origin,
+        rpId,
+      );
+      passkey.signCount = newSignCount;
+      passkey.lastUsedAt = new Date();
+      user.pendingChallenge = undefined;
+      await user.save();
+      setSessionCookie(res, String(user._id));
+      const response: AuthStepResponse = { status: "authenticated", user: toPublicUser(user) };
+      res.json(response);
+    } catch (err) {
+      res.status(401).json({
+        error: err instanceof Error ? err.message : "Passkey verification failed",
+      });
+    }
+  });
+
+  // Auth — Step 2b: Email OTP Fallback via Nodemailer SMTP + Redis TTL Cache
+  router.post("/auth/otp/send", async (req, res) => {
+    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
+    const userId = verifyMfaToken(mfaToken);
+    if (!userId) {
+      res.status(401).json({ error: "Invalid or expired MFA session" });
+      return;
+    }
+    const user = await UserModel.findById(userId);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    try {
+      const { code, delivery, expiresInSeconds } = await issueEmailOtp(
+        String(user._id),
+        user.email,
+      );
+      const response: OtpSendResponse = {
+        sent: true,
+        delivery,
+        expiresInSeconds,
+        ...(delivery === "console" && process.env.NODE_ENV !== "production"
+          ? { devCode: code }
+          : {}),
+      };
+      res.json(response);
+    } catch (err) {
+      res.status(502).json({
+        error: err instanceof Error ? `SMTP delivery failed: ${err.message}` : "SMTP delivery failed",
+      });
+    }
+  });
+
+  router.post("/auth/otp/verify", async (req, res) => {
+    const mfaToken = typeof req.body?.mfaToken === "string" ? req.body.mfaToken : "";
+    const code = String(req.body?.code || "").trim();
+    const userId = verifyMfaToken(mfaToken);
+    if (!userId) {
+      res.status(401).json({ error: "Invalid or expired MFA session" });
+      return;
+    }
+    const user = await UserModel.findById(userId);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    const result = await verifyStoredEmailOtp(String(user._id), code);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+
+    user.pendingChallenge = undefined;
+    await user.save();
     setSessionCookie(res, String(user._id));
-    res.json({ user: toPublicUser(user) });
+    const response: AuthStepResponse = { status: "authenticated", user: toPublicUser(user) };
+    res.json(response);
+  });
+
+  // Passkey management (authenticated)
+  router.get("/auth/passkeys", requireAuth, async (req: AuthedRequest, res) => {
+    const user = await UserModel.findById(req.userId);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    const list: PasskeySummary[] = (user.passkeys || []).map(
+      (pk: {
+        credentialId: string;
+        label?: string;
+        createdAt?: Date;
+        lastUsedAt?: Date;
+      }) => ({
+        credentialId: pk.credentialId,
+        label: pk.label || "Passkey",
+        createdAt: pk.createdAt ? pk.createdAt.toISOString() : new Date().toISOString(),
+        lastUsedAt: pk.lastUsedAt ? pk.lastUsedAt.toISOString() : undefined,
+      }),
+    );
+    res.json(list);
+  });
+
+  router.delete("/auth/passkeys/:credentialId", requireAuth, async (req: AuthedRequest, res) => {
+    const user = await UserModel.findById(req.userId);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    user.passkeys = (user.passkeys || []).filter(
+      (pk: { credentialId: string }) => pk.credentialId !== req.params.credentialId,
+    );
+    await user.save();
+    res.status(204).send();
   });
 
   router.post("/auth/logout", (_req, res) => {

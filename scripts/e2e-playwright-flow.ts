@@ -80,9 +80,43 @@ async function setupStatefulMocks(page: Page) {
       (pathname === "/api/auth/login" || pathname === "/api/auth/register") &&
       method === "POST"
     ) {
+      const email = String(body.email || "demo@example.com");
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "mfa_required",
+          mfaToken: "mfa_e2e_token",
+          email,
+          hasPasskey: true,
+          passkeyOptions: {
+            challenge: "ZTNlX2NoYWxsZW5nZQ",
+            rpId: "localhost",
+            timeout: 60000,
+            userVerification: "preferred",
+            allowCredentials: [{ id: "Y3JlZF9lMmU", type: "public-key" }],
+          },
+        }),
+      });
+    }
+
+    if (pathname === "/api/auth/otp/send" && method === "POST") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sent: true,
+          delivery: "console",
+          expiresInSeconds: 600,
+          devCode: "482910",
+        }),
+      });
+    }
+
+    if (pathname === "/api/auth/otp/verify" && method === "POST") {
       user = {
         id: "usr_e2e",
-        email: String(body.email || "demo@example.com"),
+        email: "demo@example.com",
         roundUpEnabled: true,
         selectedBasketId: "clean-energy-grid",
         roundUpBalanceCents: 450,
@@ -90,7 +124,15 @@ async function setupStatefulMocks(page: Page) {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ user }),
+        body: JSON.stringify({ status: "authenticated", user }),
+      });
+    }
+
+    if (pathname === "/api/auth/passkeys") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
       });
     }
 
@@ -233,7 +275,12 @@ async function main() {
     await page.goto(baseUrl, { waitUntil: "networkidle" });
     await page.fill("#email", "demo@example.com");
     await page.fill("#password", "password123");
-    await page.getByRole("button", { name: /Sign In/i }).click();
+    await page.getByRole("button", { name: /^Sign In$/i }).click();
+
+    // Passkey fails in headless without authenticator -> automatic Email OTP fallback
+    await page.locator("#otp-code").waitFor({ timeout: 10000 });
+    await page.fill("#otp-code", "482910");
+    await page.getByRole("button", { name: /Verify Email Code/i }).click();
     await page.getByText(/ESG Portfolio \(Alpaca\)/i).waitFor({ timeout: 10000 });
 
     // Link bank via Plaid
